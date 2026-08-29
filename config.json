@@ -1,5 +1,5 @@
 {
   "niche": "budget-friendly home decor",
-  "text_model": "gemini-2.5-flash",
-  "image_model": "gemini-2.5-flash-image"
+  "text_model": "gemini-3.6-flash",
+  "image_model": "gemini-3.1-flash-image"
 }
