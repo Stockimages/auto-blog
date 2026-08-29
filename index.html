@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Decor Draft — Control Panel</title>
+<style>
+  :root{
+    --plaster:#F6F2EA; --plaster-dark:#EBE3D3; --ink:#2E2A24; --ink-soft:#6B6459;
+    --wood:#A3663F; --wood-dark:#7C4B2C; --sage:#67785A; --sage-dark:#4E5C44;
+    --line:#DCD3C1; --card:#FFFDF9; --danger:#B4483A;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--plaster); color:var(--ink); font-family:"Avenir Next","Segoe UI",system-ui,sans-serif; padding-bottom:60px;}
+  header{padding:36px 24px 26px; border-bottom:1px solid var(--line); background:linear-gradient(180deg,var(--plaster) 0%, var(--plaster-dark) 100%);}
+  .header-inner{max-width:820px; margin:0 auto;}
+  .eyebrow{font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--wood-dark); font-weight:700; margin-bottom:8px;}
+  h1{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif; font-size:30px; margin:0 0 8px; font-weight:600;}
+  header p{margin:0; color:var(--ink-soft); font-size:14px; max-width:520px; line-height:1.5;}
+  main{max-width:820px; margin:0 auto; padding:26px 24px 0; display:flex; flex-direction:column; gap:18px;}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:22px 24px;}
+  .card h2{margin:0 0 14px; font-size:15px; font-weight:700;}
+  label{display:block; font-size:12px; font-weight:600; color:var(--ink-soft); margin:12px 0 5px;}
+  label:first-of-type{margin-top:0;}
+  input[type=text], input[type=password], textarea, select{
+    width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:7px;
+    font-size:14px; font-family:inherit; background:#fff; color:var(--ink);
+  }
+  .btn{display:inline-flex; align-items:center; gap:8px; padding:10px 18px; border-radius:7px; border:none;
+    font-size:14px; font-weight:700; cursor:pointer; font-family:inherit;}
+  .btn-primary{background:var(--wood); color:#fff;}
+  .btn-secondary{background:var(--sage); color:#fff;}
+  .btn-danger{background:var(--danger); color:#fff;}
+  .btn-ghost{background:transparent; color:var(--ink); border:1px solid var(--line);}
+  .btn:disabled{opacity:.5; cursor:not-allowed;}
+  .row{display:flex; gap:12px; flex-wrap:wrap; align-items:center;}
+  .pill{font-size:11px; font-weight:700; padding:4px 10px; border-radius:20px; background:var(--plaster-dark); color:var(--ink-soft);}
+  .pill.on{background:var(--sage); color:#fff;}
+  .pill.off{background:var(--line); color:var(--ink-soft);}
+  .divider{height:1px; background:var(--line); margin:16px 0;}
+  #connectCard.connected{display:none;}
+  #mainPanels{display:none;}
+  #mainPanels.show{display:flex; flex-direction:column; gap:18px;}
+  .run-row{display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px;}
+  .run-row:last-child{border-bottom:none;}
+  .badge{font-size:11px; font-weight:700; padding:2px 8px; border-radius:12px;}
+  .badge.success{background:#DCE9D4; color:var(--sage-dark);}
+  .badge.failure{background:#F3D8D3; color:var(--danger);}
+  .badge.in_progress, .badge.queued{background:#EFE6C9; color:#8A6D1E;}
+  a{color:var(--wood-dark);}
+  .note{font-size:12px; color:var(--ink-soft); line-height:1.5; margin-top:8px;}
+  .log{font-family:ui-monospace,Menlo,monospace; font-size:12px; background:#20201C; color:#E3DFD3; border-radius:8px; padding:14px; max-height:150px; overflow-y:auto; white-space:pre-wrap;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="eyebrow">Home &amp; Hearth Pipeline</div>
+    <h1>Decor Draft — Control Panel</h1>
+    <p>Ye website sirf ek remote control hai — sab kaam GitHub Actions ke andar khud hota hai. Ek dafa connect karo, phir Start/Stop, topic, aur history yahin se.</p>
+  </div>
+</header>
+
+<main>
+
+  <!-- CONNECT -->
+  <div class="card" id="connectCard">
+    <h2>Connect to your GitHub repo</h2>
+    <label>GitHub Personal Access Token</label>
+    <input type="password" id="pat" placeholder="github_pat_...">
+    <label>Repo (owner/name)</label>
+    <input type="text" id="repo" placeholder="harix/auto-blog">
+    <div class="row" style="margin-top:14px;">
+      <button class="btn btn-primary" id="connectBtn">Connect</button>
+    </div>
+    <p class="note">
+      Token banane ke liye: GitHub → Settings → Developer settings → Personal access tokens → Fine-grained token →
+      sirf isi repo tak access do → Permissions mein <b>Actions: Read & Write</b> aur <b>Contents: Read & Write</b> on karo.
+      Token sirf tumhare is browser mein (localStorage) rehta hai, kahin bhejta nahi.
+    </p>
+    <div id="connectError" style="color:var(--danger); font-size:13px; margin-top:8px;"></div>
+  </div>
+
+  <div id="mainPanels">
+
+    <!-- STATUS -->
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">Automation status</h2>
+        <span class="pill" id="statusPill">checking…</span>
+      </div>
+      <div class="row" style="margin-top:14px;">
+        <button class="btn btn-secondary" id="startBtn">Start (daily)</button>
+        <button class="btn btn-ghost" id="stopBtn">Stop</button>
+        <button class="btn btn-primary" id="runNowBtn">Run once now</button>
+        <button class="btn btn-ghost" id="disconnectBtn" style="margin-left:auto;">Disconnect</button>
+      </div>
+    </div>
+
+    <!-- TOPIC / NICHE -->
+    <div class="card">
+      <h2>Blog focus</h2>
+      <label>What should Gemini write about?</label>
+      <textarea id="nicheInput" rows="2" placeholder="budget-friendly home decor"></textarea>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn btn-secondary" id="saveNicheBtn">Save</button>
+      </div>
+    </div>
+
+    <!-- SCHEDULE -->
+    <div class="card">
+      <h2>Schedule</h2>
+      <label>How often should it post?</label>
+      <select id="scheduleSelect">
+        <option value="30 1,13 * * *">Twice a day — 6:30 AM &amp; 6:30 PM (Pakistan time)</option>
+        <option value="0 9 * * *">Once a day (9am UTC)</option>
+        <option value="0 9,18 * * *">Twice a day (9am &amp; 6pm UTC)</option>
+        <option value="0 9 */2 * *">Every 2 days</option>
+        <option value="0 9 * * 1,4">Twice a week (Mon &amp; Thu)</option>
+      </select>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn btn-secondary" id="saveScheduleBtn">Save schedule</button>
+      </div>
+      <p class="note">Times are UTC. Changing this edits the workflow file directly in your repo.</p>
+    </div>
+
+    <!-- RECENT RUNS -->
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <h2 style="margin:0;">Recent runs</h2>
+        <button class="btn btn-ghost" id="refreshRunsBtn">Refresh</button>
+      </div>
+      <div id="runsList" style="margin-top:10px; font-size:13px; color:var(--ink-soft);">Loading…</div>
+    </div>
+
+    <!-- LOG -->
+    <div class="card">
+      <h2 style="font-size:13px; color:var(--ink-soft);">Panel log</h2>
+      <div class="log" id="log">Ready.</div>
+    </div>
+
+  </div>
+
+</main>
+
+<script>
+const API = "https://api.github.com";
+let state = { pat: null, repo: null, workflowId: null };
+
+function log(msg, cls){
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  if(cls) line.style.color = cls === 'err' ? '#E8998A' : (cls === 'ok' ? '#9CC08C' : '');
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function gh(path, opts = {}){
+  const res = await fetch(`${API}${path}`, {
+    ...opts,
+    headers: {
+      'Authorization': `Bearer ${state.pat}`,
+      'Accept': 'application/vnd.github+json',
+      ...(opts.headers || {})
+    }
+  });
+  if(!res.ok){
+    const body = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+  }
+  if(res.status === 204) return null;
+  return res.json();
+}
+
+function b64EncodeUnicode(str){
+  return btoa(unescape(encodeURIComponent(str)));
+}
+function b64DecodeUnicode(str){
+  return decodeURIComponent(escape(atob(str)));
+}
+
+// ---------- CONNECT ----------
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  const pat = document.getElementById('pat').value.trim();
+  const repo = document.getElementById('repo').value.trim();
+  document.getElementById('connectError').textContent = '';
+  if(!pat || !repo){ document.getElementById('connectError').textContent = 'Token aur repo dono chahiye.'; return; }
+
+  state.pat = pat; state.repo = repo;
+  try{
+    await gh(`/repos/${repo}`);
+    const workflows = await gh(`/repos/${repo}/actions/workflows`);
+    const wf = workflows.workflows.find(w => w.path.endsWith('auto-blog.yml'));
+    if(!wf) throw new Error('auto-blog.yml workflow repo mein nahi mila.');
+    state.workflowId = wf.id;
+
+    localStorage.setItem('decorPanelPat', pat);
+    localStorage.setItem('decorPanelRepo', repo);
+
+    document.getElementById('connectCard').classList.add('connected');
+    document.getElementById('mainPanels').classList.add('show');
+    log('Connected to ' + repo, 'ok');
+    await refreshStatus();
+    await loadConfig();
+    await refreshRuns();
+  }catch(err){
+    document.getElementById('connectError').textContent = err.message;
+  }
+});
+
+document.getElementById('disconnectBtn').addEventListener('click', () => {
+  localStorage.removeItem('decorPanelPat');
+  localStorage.removeItem('decorPanelRepo');
+  location.reload();
+});
+
+// ---------- STATUS / START / STOP / RUN NOW ----------
+async function refreshStatus(){
+  const wf = await gh(`/repos/${state.repo}/actions/workflows/${state.workflowId}`);
+  const pill = document.getElementById('statusPill');
+  if(wf.state === 'active'){
+    pill.textContent = 'Running (scheduled)';
+    pill.className = 'pill on';
+  }else{
+    pill.textContent = 'Stopped';
+    pill.className = 'pill off';
+  }
+}
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  try{
+    await gh(`/repos/${state.repo}/actions/workflows/${state.workflowId}/enable`, { method: 'PUT' });
+    log('Automation started.', 'ok');
+    await refreshStatus();
+  }catch(err){ log('Start failed: ' + err.message, 'err'); }
+});
+
+document.getElementById('stopBtn').addEventListener('click', async () => {
+  try{
+    await gh(`/repos/${state.repo}/actions/workflows/${state.workflowId}/disable`, { method: 'PUT' });
+    log('Automation stopped.', 'ok');
+    await refreshStatus();
+  }catch(err){ log('Stop failed: ' + err.message, 'err'); }
+});
+
+document.getElementById('runNowBtn').addEventListener('click', async () => {
+  try{
+    const repoInfo = await gh(`/repos/${state.repo}`);
+    await gh(`/repos/${state.repo}/actions/workflows/${state.workflowId}/dispatches`, {
+      method: 'POST',
+      body: JSON.stringify({ ref: repoInfo.default_branch })
+    });
+    log('Triggered a run — check "Recent runs" in ~10 seconds.', 'ok');
+    setTimeout(refreshRuns, 8000);
+  }catch(err){ log('Run failed: ' + err.message, 'err'); }
+});
+
+// ---------- CONFIG (niche) ----------
+async function loadConfig(){
+  try{
+    const file = await gh(`/repos/${state.repo}/contents/config.json`);
+    const config = JSON.parse(b64DecodeUnicode(file.content));
+    document.getElementById('nicheInput').value = config.niche || '';
+  }catch(err){
+    log('Could not load config.json: ' + err.message, 'err');
+  }
+}
+
+document.getElementById('saveNicheBtn').addEventListener('click', async () => {
+  try{
+    const file = await gh(`/repos/${state.repo}/contents/config.json`);
+    const config = JSON.parse(b64DecodeUnicode(file.content));
+    config.niche = document.getElementById('nicheInput').value.trim();
+    await gh(`/repos/${state.repo}/contents/config.json`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        message: 'Update blog focus via control panel',
+        content: b64EncodeUnicode(JSON.stringify(config, null, 2)),
+        sha: file.sha
+      })
+    });
+    log('Blog focus saved.', 'ok');
+  }catch(err){ log('Save failed: ' + err.message, 'err'); }
+});
+
+// ---------- SCHEDULE ----------
+document.getElementById('saveScheduleBtn').addEventListener('click', async () => {
+  const newCron = document.getElementById('scheduleSelect').value;
+  try{
+    const file = await gh(`/repos/${state.repo}/contents/.github/workflows/auto-blog.yml`);
+    let text = b64DecodeUnicode(file.content);
+    text = text.replace(/- cron: '[^']*'/, `- cron: '${newCron}'`);
+    await gh(`/repos/${state.repo}/contents/.github/workflows/auto-blog.yml`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        message: 'Update schedule via control panel',
+        content: b64EncodeUnicode(text),
+        sha: file.sha
+      })
+    });
+    log('Schedule updated to: ' + newCron, 'ok');
+  }catch(err){ log('Schedule update failed: ' + err.message, 'err'); }
+});
+
+// ---------- RECENT RUNS ----------
+async function refreshRuns(){
+  try{
+    const data = await gh(`/repos/${state.repo}/actions/workflows/${state.workflowId}/runs?per_page=6`);
+    const list = document.getElementById('runsList');
+    if(!data.workflow_runs.length){
+      list.innerHTML = 'Koi run abhi tak nahi hui.';
+      return;
+    }
+    list.innerHTML = data.workflow_runs.map(run => {
+      const status = run.conclusion || run.status;
+      const date = new Date(run.created_at).toLocaleString();
+      return `<div class="run-row">
+        <span>${date}</span>
+        <span class="badge ${status}">${status}</span>
+        <a href="${run.html_url}" target="_blank">View log</a>
+      </div>`;
+    }).join('');
+  }catch(err){
+    log('Could not load runs: ' + err.message, 'err');
+  }
+}
+document.getElementById('refreshRunsBtn').addEventListener('click', refreshRuns);
+
+// ---------- AUTO-RECONNECT ----------
+window.addEventListener('load', () => {
+  const pat = localStorage.getItem('decorPanelPat');
+  const repo = localStorage.getItem('decorPanelRepo');
+  if(pat && repo){
+    document.getElementById('pat').value = pat;
+    document.getElementById('repo').value = repo;
+    document.getElementById('connectBtn').click();
+  }
+});
+</script>
+</body>
+</html>
