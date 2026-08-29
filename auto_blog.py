@@ -3,9 +3,9 @@ Fully automatic Blogger publisher for a budget home-decor blog.
 
 Flow each run:
   1. Read topics_history.json so Gemini doesn't repeat itself
-  2. Ask Gemini for a fresh topic + full article + an image prompt
-  3. Ask Gemini's image model to generate a header image
-  4. Compress the image (resize + WebP) with Pillow
+  2. Ask Gemini for a fresh topic + full article + an image search query
+  3. Search Pexels for a matching real stock photo
+  4. Overlay a bold Pinterest-style text hook, resize + compress (WebP)
   5. Commit the image + updated history to this repo (so it gets a public raw.githubusercontent.com URL)
   6. Get a fresh Blogger access token from the stored refresh token
   7. Publish the post to Blogger
@@ -19,6 +19,7 @@ import json
 import base64
 import subprocess
 import textwrap
+import random
 import time
 from io import BytesIO
 from datetime import datetime, timezone
@@ -32,15 +33,15 @@ BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
+PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
 
 # Auto-set by GitHub Actions as "owner/repo". Falls back for local testing.
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo")
 
-# Model names — Google updates these periodically. If a run starts failing
-# with a 404 "model not found" error, check the current names in Google AI
-# Studio and update the two lines below (or set as env vars of the same name).
-TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+# Model name — Google updates these periodically. If a run starts failing
+# with a 404 "model not found" error, check the current name in Google AI
+# Studio and update below (or set GEMINI_TEXT_MODEL as an env var/config value).
+TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
 
 HISTORY_FILE = "topics_history.json"
 CONFIG_FILE = "config.json"
@@ -87,10 +88,9 @@ Also write:
 - "pin_hook": a punchy, benefit- or curiosity-driven phrase, 5-8 words max,
   written like Pinterest pin text (e.g. "10 Thrift Flips That Look Expensive"),
   NOT a full sentence, no ending punctuation.
-- "image_prompt": under 20 words, for a VERTICAL (portrait, 2:3 ratio)
-  photorealistic, cozy, styled photo that matches the article. No text or
-  words in the image. Compose it with clear open space in the top third of
-  the frame, since a text banner will be added there afterward.
+- "image_prompt": 3-5 simple search keywords (not a sentence) to find a matching
+  real stock photo — e.g. "thrifted glass vase living room". No brand names,
+  no people's faces, no text.
 
 Return ONLY valid JSON. No markdown fences, no commentary before or after.
 {{
@@ -115,25 +115,34 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
     return json.loads(text)
 
 
-def generate_image(prompt):
-    res = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent",
-        params={"key": GEMINI_API_KEY},
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
-        },
-        timeout=120,
+def search_pexels_image(query):
+    res = requests.get(
+        "https://api.pexels.com/v1/search",
+        headers={"Authorization": PEXELS_API_KEY},
+        params={"query": query, "orientation": "portrait", "per_page": 15},
+        timeout=30,
     )
     if not res.ok:
-        raise RuntimeError(f"Gemini image generation failed ({res.status_code}): {res.text}")
+        raise RuntimeError(f"Pexels search failed ({res.status_code}): {res.text}")
 
-    parts = res.json()["candidates"][0]["content"]["parts"]
-    for part in parts:
-        inline = part.get("inlineData") or part.get("inline_data")
-        if inline:
-            return base64.b64decode(inline["data"])
-    raise RuntimeError("Gemini did not return an image for this prompt.")
+    photos = res.json().get("photos", [])
+    if not photos:
+        res = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": PEXELS_API_KEY},
+            params={"query": "home decor", "orientation": "portrait", "per_page": 15},
+            timeout=30,
+        )
+        res.raise_for_status()
+        photos = res.json().get("photos", [])
+        if not photos:
+            raise RuntimeError(f"No Pexels photos found for query: {query}")
+
+    photo = random.choice(photos)
+    image_url = photo["src"]["large2x"]
+    image_res = requests.get(image_url, timeout=30)
+    image_res.raise_for_status()
+    return image_res.content
 
 
 def compress_image(image_bytes, max_width=1200, quality=78):
@@ -203,7 +212,6 @@ def git_commit_and_push(paths, message):
     subprocess.run(["git", "config", "user.email", "auto-blog-bot@users.noreply.github.com"], check=True)
     subprocess.run(["git", "config", "user.name", "auto-blog-bot"], check=True)
     subprocess.run(["git", "add", *paths], check=True)
-    # Nothing to commit is not an error (e.g. re-run with same history)
     result = subprocess.run(["git", "commit", "-m", message])
     if result.returncode == 0:
         subprocess.run(["git", "push"], check=True)
@@ -241,9 +249,8 @@ def main():
     config = load_config()
     niche = config.get("niche", DEFAULT_NICHE)
 
-    global TEXT_MODEL, IMAGE_MODEL
+    global TEXT_MODEL
     TEXT_MODEL = config.get("text_model", TEXT_MODEL)
-    IMAGE_MODEL = config.get("image_model", IMAGE_MODEL)
 
     history = load_history()
 
@@ -252,8 +259,8 @@ def main():
     draft = generate_draft(history, niche)
     print("Topic chosen:", draft["title"])
 
-    print("Generating header image...")
-    raw_image = generate_image(draft["image_prompt"])
+    print("Finding a matching stock photo...")
+    raw_image = search_pexels_image(draft["image_prompt"])
     pin_hook = draft.get("pin_hook", draft["title"])
     compressed = finalize_pin_image(raw_image, pin_hook)
     print(f"Image (with pin text) compressed to {len(compressed) / 1024:.1f} KB")
@@ -270,7 +277,6 @@ def main():
     print("Committing image + history to the repo...")
     git_commit_and_push([filepath, HISTORY_FILE], f"Auto post image: {draft['title']}")
 
-    # give raw.githubusercontent.com a moment to pick up the new commit
     time.sleep(8)
 
     image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{filepath}"
