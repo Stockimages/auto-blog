@@ -1,0 +1,36 @@
+name: Auto Blog Publisher
+
+on:
+  schedule:
+    # Runs daily at 09:00 UTC — change to whatever time you want.
+    # Use https://crontab.guru to build a different schedule.
+    - cron: '0 9 * * *'
+  workflow_dispatch: {}   # adds a "Run workflow" button on GitHub for manual test runs
+
+permissions:
+  contents: write   # needed so the script can commit the generated image back to the repo
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y fonts-dejavu-core
+          pip install -r requirements.txt
+
+      - name: Generate article + image and publish to Blogger
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+        run: python auto_blog.py
