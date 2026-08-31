@@ -101,18 +101,34 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "image_prompt": "..."
 }}"""
 
-    res = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
-        params={"key": GEMINI_API_KEY},
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=120,
-    )
-    if not res.ok:
-        raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
+    max_attempts = 4
+    wait_seconds = [15, 30, 60]  # delay before attempts 2, 3, 4
 
-    text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-    text = text.replace("```json", "").replace("```", "").strip()
-    return json.loads(text)
+    for attempt in range(1, max_attempts + 1):
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=120,
+        )
+
+        if res.ok:
+            text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            text = text.replace("```json", "").replace("```", "").strip()
+            return json.loads(text)
+
+        # Retry only on transient errors (overloaded / rate-limited / server hiccup).
+        # Fail immediately on anything else (e.g. bad API key, bad request).
+        transient = res.status_code in (429, 500, 502, 503, 504)
+        is_last_attempt = attempt == max_attempts
+
+        if not transient or is_last_attempt:
+            raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
+
+        delay = wait_seconds[attempt - 1]
+        print(f"Gemini text generation failed ({res.status_code}), retrying in {delay}s "
+              f"(attempt {attempt}/{max_attempts})...")
+        time.sleep(delay)
 
 
 def search_pexels_image(query):
