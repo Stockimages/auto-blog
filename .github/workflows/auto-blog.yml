@@ -1,10 +1,6 @@
 name: Auto Blog Publisher
 
 on:
-  schedule:
-    # Runs daily at 09:00 UTC — change to whatever time you want.
-    # Use https://crontab.guru to build a different schedule.
-    - cron: '30 1,13 * * *'
   workflow_dispatch: {}   # adds a "Run workflow" button on GitHub for manual test runs
 
 permissions:
