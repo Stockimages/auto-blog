@@ -9,6 +9,8 @@ Flow each run:
   5. Commit the image + updated history to this repo (so it gets a public raw.githubusercontent.com URL)
   6. Get a fresh Blogger access token from the stored refresh token
   7. Publish the post to Blogger
+  8. Get a fresh Pinterest access token from the stored refresh token
+  9. Create a Pin on Pinterest pointing back to the new post
 
 Meant to be run by the GitHub Actions workflow in .github/workflows/auto-blog.yml,
 on a schedule, with no human interaction.
@@ -34,6 +36,12 @@ GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
 PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
+
+# Pinterest — used to auto-post a Pin right after each Blogger post goes live.
+PINTEREST_APP_ID = os.environ["PINTEREST_APP_ID"]
+PINTEREST_APP_SECRET = os.environ["PINTEREST_APP_SECRET"]
+PINTEREST_REFRESH_TOKEN = os.environ["PINTEREST_REFRESH_TOKEN"]
+PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
 
 # Auto-set by GitHub Actions as "owner/repo". Falls back for local testing.
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo")
@@ -234,6 +242,7 @@ def git_commit_and_push(paths, message):
 
 
 def get_access_token():
+    """Google/Blogger access token, refreshed from the stored Google refresh token."""
     res = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
@@ -258,6 +267,69 @@ def publish_post(access_token, title, html, labels):
     )
     if not res.ok:
         raise RuntimeError(f"Blogger publish failed ({res.status_code}): {res.text}")
+    return res.json()
+
+
+def get_pinterest_access_token():
+    """
+    Pinterest access token, refreshed from the stored Pinterest refresh token.
+    Runs fresh every time this script runs, so the 30-day access-token expiry
+    never matters — only the refresh token's own (longer) expiry does.
+
+    If Pinterest ever returns a *new* refresh_token in the response (some
+    providers rotate it), this prints a warning so you know to update the
+    PINTEREST_REFRESH_TOKEN GitHub secret manually.
+    """
+    basic_auth = base64.b64encode(
+        f"{PINTEREST_APP_ID}:{PINTEREST_APP_SECRET}".encode()
+    ).decode()
+
+    res = requests.post(
+        "https://api.pinterest.com/v5/oauth/token",
+        headers={
+            "Authorization": f"Basic {basic_auth}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": PINTEREST_REFRESH_TOKEN,
+        },
+        timeout=30,
+    )
+    if not res.ok:
+        raise RuntimeError(f"Could not refresh Pinterest access token: {res.text}")
+
+    data = res.json()
+    new_refresh_token = data.get("refresh_token")
+    if new_refresh_token and new_refresh_token != PINTEREST_REFRESH_TOKEN:
+        print("!!! Pinterest issued a NEW refresh_token. Update the "
+              "PINTEREST_REFRESH_TOKEN GitHub secret to this value:")
+        print(new_refresh_token)
+
+    return data["access_token"]
+
+
+def create_pinterest_pin(access_token, board_id, title, description, link, image_url):
+    res = requests.post(
+        "https://api.pinterest.com/v5/pins",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "board_id": board_id,
+            "title": title[:100],
+            "description": description[:500],
+            "link": link,
+            "media_source": {
+                "source_type": "image_url",
+                "url": image_url,
+            },
+        },
+        timeout=60,
+    )
+    if not res.ok:
+        raise RuntimeError(f"Pinterest pin creation failed ({res.status_code}): {res.text}")
     return res.json()
 
 
@@ -301,7 +373,26 @@ def main():
     print("Publishing to Blogger...")
     access_token = get_access_token()
     result = publish_post(access_token, draft["title"], full_html, draft.get("labels", []))
-    print("Published:", result.get("url"))
+    post_url = result.get("url")
+    print("Published:", post_url)
+
+    # Pinterest is posted last and wrapped in try/except on purpose: if this
+    # fails for any reason, the Blogger post has already gone live and should
+    # NOT be rolled back or treated as a failed run.
+    print("Posting to Pinterest...")
+    try:
+        pinterest_token = get_pinterest_access_token()
+        pin_result = create_pinterest_pin(
+            pinterest_token,
+            board_id=PINTEREST_BOARD_ID,
+            title=pin_hook,
+            description=draft["title"],
+            link=post_url,
+            image_url=image_url,
+        )
+        print("Pinned:", pin_result.get("id"))
+    except Exception as e:
+        print(f"Pinterest post failed (blog post is still published fine): {e}")
 
 
 if __name__ == "__main__":
