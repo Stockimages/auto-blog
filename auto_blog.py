@@ -51,6 +51,11 @@ PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
 # to be discovered via the sitemap on its own schedule.
 GOOGLE_INDEXING_KEY = os.environ.get("GOOGLE_INDEXING_KEY")
 
+# Personal access token with "Secrets: read and write" permission on this repo
+# only — used to auto-update the PINTEREST_REFRESH_TOKEN secret when Pinterest
+# rotates it, so no manual copy-paste is ever needed.
+GH_SECRETS_PAT = os.environ.get("GH_SECRETS_PAT")
+
 # Pinterest — used to auto-post a Pin right after each Blogger post goes live.
 PINTEREST_APP_ID = os.environ["PINTEREST_APP_ID"]
 PINTEREST_APP_SECRET = os.environ["PINTEREST_APP_SECRET"]
@@ -364,6 +369,55 @@ def publish_post(access_token, title, html, labels):
     return res.json()
 
 
+def update_github_secret(secret_name, secret_value):
+    """
+    Updates a GitHub Actions repository secret via the API, so tokens that
+    rotate (like Pinterest's refresh_token) never need manual copy-pasting.
+    Requires GH_SECRETS_PAT (a fine-grained PAT scoped to this repo with
+    "Secrets: read and write"). If that's not set, this just prints instead —
+    it never raises, so a missing PAT never breaks the actual publish run.
+    """
+    if not GH_SECRETS_PAT:
+        print(f"GH_SECRETS_PAT not set — could not auto-update {secret_name}. "
+              f"New value (update it manually):")
+        print(secret_value)
+        return
+
+    try:
+        from nacl import encoding, public
+
+        headers = {
+            "Authorization": f"Bearer {GH_SECRETS_PAT}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        key_res = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/public-key",
+            headers=headers, timeout=30,
+        )
+        key_res.raise_for_status()
+        key_data = key_res.json()
+
+        public_key = public.PublicKey(key_data["key"].encode("utf-8"), encoding.Base64Encoder())
+        sealed_box = public.SealedBox(public_key)
+        encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
+        encrypted_b64 = base64.b64encode(encrypted).decode("utf-8")
+
+        put_res = requests.put(
+            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/{secret_name}",
+            headers=headers,
+            json={"encrypted_value": encrypted_b64, "key_id": key_data["key_id"]},
+            timeout=30,
+        )
+        if put_res.status_code in (201, 204):
+            print(f"Auto-updated GitHub secret: {secret_name}")
+        else:
+            print(f"Failed to auto-update {secret_name} ({put_res.status_code}): {put_res.text}")
+    except Exception as e:
+        print(f"Could not auto-update {secret_name} (new value below, update manually): {e}")
+        print(secret_value)
+
+
 def get_pinterest_access_token():
     """
     Pinterest access token, refreshed from the stored Pinterest refresh token.
@@ -396,9 +450,8 @@ def get_pinterest_access_token():
     data = res.json()
     new_refresh_token = data.get("refresh_token")
     if new_refresh_token and new_refresh_token != PINTEREST_REFRESH_TOKEN:
-        print("!!! Pinterest issued a NEW refresh_token. Update the "
-              "PINTEREST_REFRESH_TOKEN GitHub secret to this value:")
-        print(new_refresh_token)
+        print("Pinterest issued a new refresh_token — updating GitHub secret...")
+        update_github_secret("PINTEREST_REFRESH_TOKEN", new_refresh_token)
 
     return data["access_token"]
 
