@@ -134,6 +134,12 @@ should earn its place.
 
 STRUCTURE (as HTML, using ONLY these tags: p, h2, h3, ul, ol, li, table, thead,
 tbody, tr, th, td, strong, blockquote, a):
+
+CRITICAL JSON-SAFETY RULE: inside the "html" string, use SINGLE quotes for
+every HTML attribute value (e.g. <a href='https://...'>, not <a href="https://...">).
+Never use a double-quote character anywhere inside the html string — double
+quotes are the JSON string delimiter and will break the response.
+
 1. Opening hook paragraph (standalone, curiosity or a specific promise —
    this is what Pinterest/Google show as the preview).
 2. A few h2/h3 sections walking through the real project or tips, using
@@ -194,7 +200,17 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
         if res.ok:
             text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
             text = text.replace("```json", "").replace("```", "").strip()
-            return json.loads(text)
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as e:
+                is_last_attempt = attempt == max_attempts
+                if is_last_attempt:
+                    raise RuntimeError(f"Gemini returned invalid JSON after {max_attempts} attempts: {e}")
+                delay = wait_seconds[attempt - 1]
+                print(f"Gemini returned invalid JSON ({e}), retrying in {delay}s "
+                      f"(attempt {attempt}/{max_attempts})...")
+                time.sleep(delay)
+                continue
 
         # Retry only on transient errors (overloaded / rate-limited / server hiccup).
         # Fail immediately on anything else (e.g. bad API key, bad request).
