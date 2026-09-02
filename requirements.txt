@@ -1,3 +1,4 @@
 requests
 Pillow
 google-auth
+pynacl
