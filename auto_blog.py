@@ -86,6 +86,47 @@ BANNED_PHRASES = [
 ]
 
 
+DEFAULT_WAIT_SECONDS = [15, 30, 60]
+
+
+def robust_request(method, url, max_attempts=4, wait_seconds=None, retry_statuses=(429, 500, 502, 503, 504), **kwargs):
+    """
+    A requests.request() wrapper used for every network call in this script.
+    Retries on:
+      - network-level failures (timeout, connection reset, DNS hiccup — these
+        raise before any HTTP response exists, so status_code can't catch them)
+      - the given transient HTTP status codes (rate-limited / server hiccups)
+    Anything else (4xx auth/bad-request errors) is returned as-is immediately
+    for the caller to handle/raise with a specific message.
+    """
+    wait_seconds = wait_seconds or DEFAULT_WAIT_SECONDS
+    last_response = None
+
+    for attempt in range(1, max_attempts + 1):
+        is_last_attempt = attempt == max_attempts
+        try:
+            res = requests.request(method, url, **kwargs)
+        except requests.exceptions.RequestException as e:
+            if is_last_attempt:
+                raise RuntimeError(f"Request to {url} failed after {max_attempts} attempts (network error): {e}")
+            delay = wait_seconds[min(attempt - 1, len(wait_seconds) - 1)]
+            print(f"Network error calling {url} ({e}), retrying in {delay}s "
+                  f"(attempt {attempt}/{max_attempts})...")
+            time.sleep(delay)
+            continue
+
+        if res.ok or res.status_code not in retry_statuses or is_last_attempt:
+            return res
+
+        last_response = res
+        delay = wait_seconds[min(attempt - 1, len(wait_seconds) - 1)]
+        print(f"{url} returned {res.status_code}, retrying in {delay}s "
+              f"(attempt {attempt}/{max_attempts})...")
+        time.sleep(delay)
+
+    return last_response
+
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE) as f:
@@ -202,12 +243,25 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
     wait_seconds = [15, 30, 60]  # delay before attempts 2, 3, 4
 
     for attempt in range(1, max_attempts + 1):
-        res = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
-            params={"key": GEMINI_API_KEY},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=120,
-        )
+        is_last_attempt = attempt == max_attempts
+
+        try:
+            res = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=150,
+            )
+        except requests.exceptions.RequestException as e:
+            # Network-level failure (timeout, connection reset, DNS hiccup, etc.)
+            # — no HTTP response at all, so this can't be checked via status_code.
+            if is_last_attempt:
+                raise RuntimeError(f"Gemini request failed after {max_attempts} attempts (network error): {e}")
+            delay = wait_seconds[attempt - 1]
+            print(f"Gemini request failed ({e}), retrying in {delay}s "
+                  f"(attempt {attempt}/{max_attempts})...")
+            time.sleep(delay)
+            continue
 
         if res.ok:
             text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -215,7 +269,6 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
             try:
                 return json.loads(text)
             except json.JSONDecodeError as e:
-                is_last_attempt = attempt == max_attempts
                 if is_last_attempt:
                     raise RuntimeError(f"Gemini returned invalid JSON after {max_attempts} attempts: {e}")
                 delay = wait_seconds[attempt - 1]
@@ -227,7 +280,6 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
         # Retry only on transient errors (overloaded / rate-limited / server hiccup).
         # Fail immediately on anything else (e.g. bad API key, bad request).
         transient = res.status_code in (429, 500, 502, 503, 504)
-        is_last_attempt = attempt == max_attempts
 
         if not transient or is_last_attempt:
             raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
@@ -239,8 +291,8 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
 
 
 def search_pexels_image(query, orientation="portrait"):
-    res = requests.get(
-        "https://api.pexels.com/v1/search",
+    res = robust_request(
+        "GET", "https://api.pexels.com/v1/search",
         headers={"Authorization": PEXELS_API_KEY},
         params={"query": query, "orientation": orientation, "per_page": 15},
         timeout=30,
@@ -250,21 +302,23 @@ def search_pexels_image(query, orientation="portrait"):
 
     photos = res.json().get("photos", [])
     if not photos:
-        res = requests.get(
-            "https://api.pexels.com/v1/search",
+        res = robust_request(
+            "GET", "https://api.pexels.com/v1/search",
             headers={"Authorization": PEXELS_API_KEY},
             params={"query": "home decor", "orientation": orientation, "per_page": 15},
             timeout=30,
         )
-        res.raise_for_status()
+        if not res.ok:
+            raise RuntimeError(f"Pexels fallback search failed ({res.status_code}): {res.text}")
         photos = res.json().get("photos", [])
         if not photos:
             raise RuntimeError(f"No Pexels photos found for query: {query}")
 
     photo = random.choice(photos)
     image_url = photo["src"]["large2x"]
-    image_res = requests.get(image_url, timeout=30)
-    image_res.raise_for_status()
+    image_res = robust_request("GET", image_url, timeout=30)
+    if not image_res.ok:
+        raise RuntimeError(f"Pexels image download failed ({image_res.status_code})")
     return image_res.content
 
 
@@ -331,19 +385,31 @@ def finalize_pin_image(raw_image_bytes, hook_text, max_width=1200, quality=78):
     return out.getvalue()
 
 
-def git_commit_and_push(paths, message):
+def git_commit_and_push(paths, message, max_attempts=3):
     subprocess.run(["git", "config", "user.email", "auto-blog-bot@users.noreply.github.com"], check=True)
     subprocess.run(["git", "config", "user.name", "auto-blog-bot"], check=True)
     subprocess.run(["git", "add", *paths], check=True)
     result = subprocess.run(["git", "commit", "-m", message])
-    if result.returncode == 0:
-        subprocess.run(["git", "push"], check=True)
+    if result.returncode != 0:
+        # Nothing to commit — not an error, just means these paths had no changes.
+        return
+
+    for attempt in range(1, max_attempts + 1):
+        push_result = subprocess.run(["git", "push"])
+        if push_result.returncode == 0:
+            return
+        is_last_attempt = attempt == max_attempts
+        if is_last_attempt:
+            raise RuntimeError("git push failed after retries — see logs above for git's error output.")
+        print(f"git push failed (attempt {attempt}/{max_attempts}), "
+              f"pulling latest changes and retrying...")
+        subprocess.run(["git", "pull", "--rebase"], check=True)
 
 
 def get_access_token():
     """Google/Blogger access token, refreshed from the stored Google refresh token."""
-    res = requests.post(
-        "https://oauth2.googleapis.com/token",
+    res = robust_request(
+        "POST", "https://oauth2.googleapis.com/token",
         data={
             "client_id": GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
@@ -358,8 +424,8 @@ def get_access_token():
 
 
 def publish_post(access_token, title, html, labels):
-    res = requests.post(
-        f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/posts/",
+    res = robust_request(
+        "POST", f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/posts/",
         headers={"Authorization": f"Bearer {access_token}"},
         json={"title": title, "content": html, "labels": labels},
         timeout=60,
@@ -391,8 +457,8 @@ def update_github_secret(secret_name, secret_value):
             "Accept": "application/vnd.github+json",
         }
 
-        key_res = requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/public-key",
+        key_res = robust_request(
+            "GET", f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/public-key",
             headers=headers, timeout=30,
         )
         key_res.raise_for_status()
@@ -403,8 +469,8 @@ def update_github_secret(secret_name, secret_value):
         encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
         encrypted_b64 = base64.b64encode(encrypted).decode("utf-8")
 
-        put_res = requests.put(
-            f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/{secret_name}",
+        put_res = robust_request(
+            "PUT", f"https://api.github.com/repos/{GITHUB_REPOSITORY}/actions/secrets/{secret_name}",
             headers=headers,
             json={"encrypted_value": encrypted_b64, "key_id": key_data["key_id"]},
             timeout=30,
@@ -432,8 +498,8 @@ def get_pinterest_access_token():
         f"{PINTEREST_APP_ID}:{PINTEREST_APP_SECRET}".encode()
     ).decode()
 
-    res = requests.post(
-        "https://api.pinterest.com/v5/oauth/token",
+    res = robust_request(
+        "POST", "https://api.pinterest.com/v5/oauth/token",
         headers={
             "Authorization": f"Basic {basic_auth}",
             "Content-Type": "application/x-www-form-urlencoded",
@@ -457,8 +523,8 @@ def get_pinterest_access_token():
 
 
 def create_pinterest_pin(access_token, board_id, title, description, link, image_url):
-    res = requests.post(
-        "https://api.pinterest.com/v5/pins",
+    res = robust_request(
+        "POST", "https://api.pinterest.com/v5/pins",
         headers={
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
@@ -499,8 +565,8 @@ def submit_url_for_indexing(url):
         )
         credentials.refresh(GoogleAuthRequest())
 
-        res = requests.post(
-            "https://indexing.googleapis.com/v3/urlNotifications:publish",
+        res = robust_request(
+            "POST", "https://indexing.googleapis.com/v3/urlNotifications:publish",
             headers={
                 "Authorization": f"Bearer {credentials.token}",
                 "Content-Type": "application/json",
