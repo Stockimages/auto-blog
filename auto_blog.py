@@ -2,21 +2,28 @@
 Fully automatic Blogger publisher for a budget home-decor blog.
 
 Flow each run:
-  1. Read topics_history.json so Gemini doesn't repeat itself
-  2. Ask Gemini for a fresh topic + full article + an image search query
-  3. Search Pexels for a matching real stock photo
-  4. Overlay a bold Pinterest-style text hook, resize + compress (WebP)
-  5. Commit the image + updated history to this repo (so it gets a public raw.githubusercontent.com URL)
-  6. Get a fresh Blogger access token from the stored refresh token
-  7. Publish the post to Blogger
-  8. Get a fresh Pinterest access token from the stored refresh token
-  9. Create a Pin on Pinterest pointing back to the new post
+  1. Read topics_history.json (titles + urls) so Gemini doesn't repeat itself
+     and can link to relevant older posts of ours
+  2. Ask Gemini for: topic, full article (with internal links + a budget
+     table + section-image placeholders), a Pinterest hook, a hero image
+     search query, and a search query for each in-article section image
+  3. Fetch a vertical hero photo from Pexels (for Pinterest) + a horizontal
+     photo per section (for the article body)
+  4. Overlay a bold Pinterest-style text hook on the hero image only
+  5. Commit all images to this repo (so they get public raw.githubusercontent.com URLs)
+  6. Swap the section-image placeholders in the HTML for real <img> tags
+  7. Get a fresh Blogger access token from the stored refresh token
+  8. Publish the post to Blogger
+  9. Save this post's title + URL into history (for future internal linking)
+  10. Get a fresh Pinterest access token from the stored refresh token
+  11. Create a Pin on Pinterest pointing back to the new post
 
 Meant to be run by the GitHub Actions workflow in .github/workflows/auto-blog.yml,
 on a schedule, with no human interaction.
 """
 
 import os
+import re
 import json
 import base64
 import subprocess
@@ -55,6 +62,17 @@ HISTORY_FILE = "topics_history.json"
 CONFIG_FILE = "config.json"
 DEFAULT_NICHE = "budget-friendly home decor"
 
+# Words/phrases that make AI writing sound canned. Gemini is told to avoid these.
+BANNED_PHRASES = [
+    "elevate", "delve", "unlock", "unleash", "seamless", "seamlessly",
+    "game-changer", "game changer", "revolutionize", "boasts", "furthermore",
+    "moreover", "in today's world", "in today's day and age", "when it comes to",
+    "it's important to note", "in conclusion", "at the end of the day",
+    "realm", "tapestry", "testament to", "landscape of", "dive into",
+    "unveil", "unveiling", "embark", "embark on a journey", "whether you're",
+    "in the world of", "look no further", "let's face it",
+]
+
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -77,36 +95,89 @@ def save_history(history):
 
 def generate_draft(history, niche):
     recent_titles = [h["title"] for h in history[-50:]]
-    prompt = f"""You are the writer for a {niche} blog whose posts are shared to Pinterest
-automatically the moment they're published. Every post needs to win a Pinterest click
-first, then deliver once someone lands on the article.
+
+    # Only entries that have a URL (i.e. posts we've actually published since
+    # URL-tracking was added) are usable as internal-link candidates.
+    linkable = [h for h in history if h.get("url")][-20:]
+    linkable_json = json.dumps(
+        [{"title": h["title"], "url": h["url"]} for h in linkable],
+        ensure_ascii=False,
+    )
+
+    banned_list = ", ".join(f'"{w}"' for w in BANNED_PHRASES)
+
+    prompt = f"""You are a real person who runs a {niche} blog and personally writes every
+post. You've done these projects yourself, in your own home, on a real budget.
+Posts are shared to Pinterest automatically the moment they're published, so
+the opening line has to earn a click — then the article has to actually
+deliver, like a friend explaining exactly how they did something.
 
 Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
 Pick ONE fresh, specific, practical angle on {niche} that is not in that list.
 
-Write a 500-800 word article: h2/h3 subheadings, short paragraphs, concrete
-actionable tips (real price ranges, real product types, real techniques).
-Avoid vague generic advice. The article's OPENING paragraph must work as a
-standalone hook (curiosity or a specific promise) since Pinterest and search
-engines often show just this first line as the preview text.
+WRITING VOICE — this is the most important instruction:
+- Write like a real person talking to a friend, not like a content mill.
+- Vary sentence length. Short punchy sentences next to longer ones. Use contractions.
+- Be specific and concrete everywhere: real product types, real store names when
+  natural (Ikea, Home Depot, Target, thrift stores, Facebook Marketplace), real
+  price ranges, real tools, real brand-agnostic techniques.
+- It's fine to have a mild personal opinion or aside ("I was skeptical about this one, but...").
+- NEVER use these overused AI-sounding words/phrases, in any form: {banned_list}.
+- No generic filler sentences that could apply to any home-decor post. Every
+  paragraph must teach something specific or move the project forward.
+
+LENGTH: 900-1300 words. Do not pad to hit a word count — if the honest,
+specific version of this article is 950 words, that's fine. Every sentence
+should earn its place.
+
+STRUCTURE (as HTML, using ONLY these tags: p, h2, h3, ul, ol, li, table, thead,
+tbody, tr, th, td, strong, blockquote, a):
+1. Opening hook paragraph (standalone, curiosity or a specific promise —
+   this is what Pinterest/Google show as the preview).
+2. A few h2/h3 sections walking through the real project or tips, using
+   <ul> for independent tips/ideas and <ol> for sequential step-by-step
+   instructions — pick whichever actually fits each section.
+3. Include ONE real <table> somewhere natural in the article: a budget /
+   materials breakdown with columns like Item, Price. Use realistic prices
+   that add up to a sensible total, and mention the total in the text near
+   the table (e.g. "All in, this came out to about $X").
+4. INTERNAL LINKS: here are {len(linkable)} of our own previously published
+   posts (title + real URL): {linkable_json}
+   If (and only if) 1-3 of them are genuinely relevant to THIS article's
+   topic, link to them naturally in-line inside a sentence using
+   <a href="the exact URL">relevant anchor text</a> — never a bare "read
+   more" list, never a fabricated URL, never forced if nothing fits.
+5. IMAGE PLACEHOLDERS: after the intro and after 2-3 of the major sections
+   (never as the very first thing), insert an image placeholder on its own
+   line: [[IMG_1]], then [[IMG_2]], then [[IMG_3]] if the article is long
+   enough — sequential numbering, 2-3 total. Do not add more placeholders
+   than you provide section_images for.
 
 Also write:
 - "pin_hook": a punchy, benefit- or curiosity-driven phrase, 5-8 words max,
   written like Pinterest pin text (e.g. "10 Thrift Flips That Look Expensive"),
   NOT a full sentence, no ending punctuation.
-- "image_prompt": 3-5 simple search keywords (not a sentence) to find a matching
-  real stock photo — e.g. "thrifted glass vase living room". No brand names,
-  no people's faces, no text.
+- "image_prompt": 3-5 simple search keywords (not a sentence) for the vertical
+  HERO photo (this is the one shown on Pinterest) — e.g. "thrifted glass vase
+  living room". No brand names, no people's faces, no text.
+- "section_images": a list matching your [[IMG_n]] placeholders, each with a
+  "token" (e.g. "IMG_1") and a "query" (3-5 keyword search terms for a real,
+  horizontal photo matching that section of the article — no people's faces,
+  no text).
 
 Return ONLY valid JSON. No markdown fences, no commentary before or after.
 {{
   "title": "a specific, honest, clickable title",
   "pin_hook": "...",
   "labels": ["label1", "label2", "label3"],
-  "html": "<p>hook opening paragraph</p><h2>...</h2><p>...</p> ... full article body as simple HTML",
-  "image_prompt": "..."
+  "html": "full article body as HTML, following every rule above",
+  "image_prompt": "...",
+  "section_images": [
+    {{"token": "IMG_1", "query": "..."}},
+    {{"token": "IMG_2", "query": "..."}}
+  ]
 }}"""
 
     max_attempts = 4
@@ -139,11 +210,11 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
         time.sleep(delay)
 
 
-def search_pexels_image(query):
+def search_pexels_image(query, orientation="portrait"):
     res = requests.get(
         "https://api.pexels.com/v1/search",
         headers={"Authorization": PEXELS_API_KEY},
-        params={"query": query, "orientation": "portrait", "per_page": 15},
+        params={"query": query, "orientation": orientation, "per_page": 15},
         timeout=30,
     )
     if not res.ok:
@@ -154,7 +225,7 @@ def search_pexels_image(query):
         res = requests.get(
             "https://api.pexels.com/v1/search",
             headers={"Authorization": PEXELS_API_KEY},
-            params={"query": "home decor", "orientation": "portrait", "per_page": 15},
+            params={"query": "home decor", "orientation": orientation, "per_page": 15},
             timeout=30,
         )
         res.raise_for_status()
@@ -347,34 +418,74 @@ def main():
     draft = generate_draft(history, niche)
     print("Topic chosen:", draft["title"])
 
-    print("Finding a matching stock photo...")
-    raw_image = search_pexels_image(draft["image_prompt"])
-    pin_hook = draft.get("pin_hook", draft["title"])
-    compressed = finalize_pin_image(raw_image, pin_hook)
-    print(f"Image (with pin text) compressed to {len(compressed) / 1024:.1f} KB")
-
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     os.makedirs("images", exist_ok=True)
-    filename = f"decor-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.webp"
-    filepath = os.path.join("images", filename)
-    with open(filepath, "wb") as f:
-        f.write(compressed)
+    committed_paths = []
 
-    history.append({"title": draft["title"], "date": datetime.now(timezone.utc).isoformat()})
-    save_history(history)
+    # --- Hero image (vertical, with the Pinterest text hook baked in) ---
+    print("Finding hero (Pinterest) photo...")
+    raw_hero = search_pexels_image(draft["image_prompt"], orientation="portrait")
+    pin_hook = draft.get("pin_hook", draft["title"])
+    hero_compressed = finalize_pin_image(raw_hero, pin_hook)
+    hero_filename = f"decor-{ts}-hero.webp"
+    hero_filepath = os.path.join("images", hero_filename)
+    with open(hero_filepath, "wb") as f:
+        f.write(hero_compressed)
+    committed_paths.append(hero_filepath)
+    print(f"Hero image compressed to {len(hero_compressed) / 1024:.1f} KB")
 
-    print("Committing image + history to the repo...")
-    git_commit_and_push([filepath, HISTORY_FILE], f"Auto post image: {draft['title']}")
+    # --- Section images (horizontal, no text overlay, one per placeholder) ---
+    section_images = draft.get("section_images", [])
+    section_urls = {}
+    for i, section in enumerate(section_images):
+        token = section.get("token", f"IMG_{i+1}")
+        query = section.get("query", draft["image_prompt"])
+        print(f"Finding section photo for {token}: {query}")
+        raw_section = search_pexels_image(query, orientation="landscape")
+        section_compressed = compress_image(raw_section)
+        section_filename = f"decor-{ts}-{token.lower()}.webp"
+        section_filepath = os.path.join("images", section_filename)
+        with open(section_filepath, "wb") as f:
+            f.write(section_compressed)
+        committed_paths.append(section_filepath)
+        section_urls[token] = (
+            f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{section_filepath}"
+        )
 
+    print("Committing images to the repo...")
+    git_commit_and_push(committed_paths, f"Auto post images: {draft['title']}")
     time.sleep(8)
 
-    image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{filepath}"
-    full_html = f'<img src="{image_url}" alt="" style="max-width:100%;height:auto;" />\n{draft["html"]}'
+    hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
+
+    # Swap [[IMG_n]] placeholders for real <img> tags.
+    body_html = draft["html"]
+    for token, url in section_urls.items():
+        img_tag = f'<img src="{url}" alt="" style="max-width:100%;height:auto;" />'
+        body_html = re.sub(rf"\[\[{re.escape(token)}\]\]", img_tag, body_html)
+    # Remove any leftover placeholders Gemini added without a matching section_images entry.
+    body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
+
+    full_html = (
+        f'<img src="{hero_url}" alt="" style="max-width:100%;height:auto;" />\n{body_html}'
+    )
 
     print("Publishing to Blogger...")
     access_token = get_access_token()
     result = publish_post(access_token, draft["title"], full_html, draft.get("labels", []))
     post_url = result.get("url")
     print("Published:", post_url)
+
+    # History (with URL, for future internal linking) is saved and committed
+    # AFTER publishing, now that we actually know the post's URL.
+    history.append({
+        "title": draft["title"],
+        "date": datetime.now(timezone.utc).isoformat(),
+        "url": post_url,
+    })
+    save_history(history)
+    print("Committing history...")
+    git_commit_and_push([HISTORY_FILE], f"Auto post history: {draft['title']}")
 
     # Pinterest is posted last and wrapped in try/except on purpose: if this
     # fails for any reason, the Blogger post has already gone live and should
@@ -388,7 +499,7 @@ def main():
             title=pin_hook,
             description=draft["title"],
             link=post_url,
-            image_url=image_url,
+            image_url=hero_url,
         )
         print("Pinned:", pin_result.get("id"))
     except Exception as e:
