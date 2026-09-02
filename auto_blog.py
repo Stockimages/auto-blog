@@ -62,6 +62,10 @@ PINTEREST_APP_SECRET = os.environ["PINTEREST_APP_SECRET"]
 PINTEREST_REFRESH_TOKEN = os.environ["PINTEREST_REFRESH_TOKEN"]
 PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
 
+# Facebook Page — auto-posts a link to the Page right after each Blogger post.
+FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
+FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
+
 # Auto-set by GitHub Actions as "owner/repo". Falls back for local testing.
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo")
 
@@ -582,6 +586,33 @@ def submit_url_for_indexing(url):
         print(f"Indexing API submission failed (post still published fine): {e}")
 
 
+def post_to_facebook_page(message, link):
+    """
+    Posts a link to the Facebook Page's feed. Never raises — if this fails
+    or isn't configured, the post is still published everywhere else fine.
+    """
+    if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook post.")
+        return
+
+    try:
+        res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/feed",
+            data={
+                "message": message,
+                "link": link,
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+        if res.ok:
+            print("Posted to Facebook:", res.json().get("id"))
+        else:
+            print(f"Facebook post failed ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"Facebook post failed (blog post is still published fine): {e}")
+
+
 def main():
     config = load_config()
     niche = config.get("niche", DEFAULT_NICHE)
@@ -656,6 +687,9 @@ def main():
 
     print("Notifying Google Indexing API...")
     submit_url_for_indexing(post_url)
+
+    print("Posting to Facebook Page...")
+    post_to_facebook_page(pin_hook, post_url)
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
