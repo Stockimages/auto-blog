@@ -34,6 +34,8 @@ from io import BytesIO
 from datetime import datetime, timezone
 
 import requests
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from PIL import Image, ImageDraw, ImageFont
 
 # ---- Required secrets / env vars (set these as GitHub Actions secrets) ----
@@ -43,6 +45,11 @@ GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
 PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
+
+# Service-account JSON (full contents) for the Google Indexing API — lets us
+# tell Google to (re)crawl a new post immediately instead of waiting for it
+# to be discovered via the sitemap on its own schedule.
+GOOGLE_INDEXING_KEY = os.environ.get("GOOGLE_INDEXING_KEY")
 
 # Pinterest — used to auto-post a Pin right after each Blogger post goes live.
 PINTEREST_APP_ID = os.environ["PINTEREST_APP_ID"]
@@ -420,6 +427,42 @@ def create_pinterest_pin(access_token, board_id, title, description, link, image
     return res.json()
 
 
+def submit_url_for_indexing(url):
+    """
+    Tell Google to (re)crawl this URL now, via the Indexing API, using the
+    service-account key stored in GOOGLE_INDEXING_KEY. Never raises — if this
+    fails or isn't configured, the post is still published and still gets
+    indexed eventually via the normal sitemap crawl, just slower.
+    """
+    if not GOOGLE_INDEXING_KEY:
+        print("GOOGLE_INDEXING_KEY not set — skipping instant indexing "
+              "(post will still be found via the sitemap eventually).")
+        return
+
+    try:
+        key_info = json.loads(GOOGLE_INDEXING_KEY)
+        credentials = service_account.Credentials.from_service_account_info(
+            key_info, scopes=["https://www.googleapis.com/auth/indexing"]
+        )
+        credentials.refresh(GoogleAuthRequest())
+
+        res = requests.post(
+            "https://indexing.googleapis.com/v3/urlNotifications:publish",
+            headers={
+                "Authorization": f"Bearer {credentials.token}",
+                "Content-Type": "application/json",
+            },
+            json={"url": url, "type": "URL_UPDATED"},
+            timeout=30,
+        )
+        if res.ok:
+            print("Submitted to Google Indexing API:", url)
+        else:
+            print(f"Indexing API call failed ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"Indexing API submission failed (post still published fine): {e}")
+
+
 def main():
     config = load_config()
     niche = config.get("niche", DEFAULT_NICHE)
@@ -491,6 +534,9 @@ def main():
     result = publish_post(access_token, draft["title"], full_html, draft.get("labels", []))
     post_url = result.get("url")
     print("Published:", post_url)
+
+    print("Notifying Google Indexing API...")
+    submit_url_for_indexing(post_url)
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
