@@ -1,0 +1,15 @@
+{
+  "blogger": {
+    "success": false,
+    "url": null,
+    "timestamp": "2026-09-03T08:06:50.314875+00:00"
+  },
+  "facebook": {
+    "success": false,
+    "timestamp": "2026-09-03T08:06:50.314875+00:00"
+  },
+  "pinterest": {
+    "success": false,
+    "timestamp": "2026-09-03T08:06:50.314875+00:00"
+  }
+}
