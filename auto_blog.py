@@ -72,12 +72,13 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo
 # Model name — Google updates these periodically. If a run starts failing
 # with a 404 "model not found" error, check the current name in Google AI
 # Studio and update below (or set GEMINI_TEXT_MODEL as an env var/config value).
-TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.7-flash")
+TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
 
 # If TEXT_MODEL is overloaded/unavailable across all its retries, we fall
 # back through these proven models in order rather than failing the run.
-FALLBACK_TEXT_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
-FALLBACK_TEXT_MODEL_2 = os.environ.get("GEMINI_FALLBACK_MODEL_2", "gemini-2.5-flash")
+FALLBACK_TEXT_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
+FALLBACK_TEXT_MODEL_2 = os.environ.get("GEMINI_FALLBACK_MODEL_2", "gemini-3.6-flash")
+FALLBACK_TEXT_MODEL_3 = os.environ.get("GEMINI_FALLBACK_MODEL_3", "gemini-3.5-flash")
 
 HISTORY_FILE = "topics_history.json"
 CONFIG_FILE = "config.json"
@@ -258,6 +259,8 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
         models_to_try.append(FALLBACK_TEXT_MODEL)
     if FALLBACK_TEXT_MODEL_2 and FALLBACK_TEXT_MODEL_2 not in models_to_try:
         models_to_try.append(FALLBACK_TEXT_MODEL_2)
+    if FALLBACK_TEXT_MODEL_3 and FALLBACK_TEXT_MODEL_3 not in models_to_try:
+        models_to_try.append(FALLBACK_TEXT_MODEL_3)
 
     last_error = None
     for model_index, model in enumerate(models_to_try):
