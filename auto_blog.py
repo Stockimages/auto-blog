@@ -66,6 +66,13 @@ PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
 
+# Instagram Business account — auto-posts the hero image right after each
+# Blogger post. INSTAGRAM_ACCESS_TOKEN is a Facebook Page Access Token
+# (derived from a long-lived user token via Graph API Explorer), which
+# doesn't expire on its own — no refresh logic needed, unlike Pinterest.
+INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID")
+INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+
 # Auto-set by GitHub Actions as "owner/repo". Falls back for local testing.
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo")
 
@@ -646,10 +653,56 @@ def post_to_facebook_page(message, link):
         return False
 
 
+def post_to_instagram(caption, image_url):
+    """
+    Creates an Instagram media container from a public image URL, then
+    publishes it. Uses the Facebook Graph API with a Page Access Token
+    (non-expiring). Never raises — if this fails or isn't configured, the
+    post is still published everywhere else fine. Returns True/False so the
+    caller can record status for the dashboard.
+    """
+    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
+        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram post.")
+        return False
+
+    try:
+        create_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+            data={
+                "image_url": image_url,
+                "caption": caption,
+                "access_token": INSTAGRAM_ACCESS_TOKEN,
+            },
+            timeout=60,
+        )
+        if not create_res.ok:
+            print(f"Instagram media creation failed ({create_res.status_code}): {create_res.text}")
+            return False
+        creation_id = create_res.json()["id"]
+
+        # Give Instagram a moment to finish processing the image before publishing.
+        time.sleep(10)
+
+        publish_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
+            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if publish_res.ok:
+            print("Posted to Instagram:", publish_res.json().get("id"))
+            return True
+        else:
+            print(f"Instagram publish failed ({publish_res.status_code}): {publish_res.text}")
+            return False
+    except Exception as e:
+        print(f"Instagram post failed (blog post is still published fine): {e}")
+        return False
+
+
 STATUS_FILE = "status.json"
 
 
-def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok):
+def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok):
     """
     Writes a small status.json the control panel reads to show a simple
     green-tick/red-cross per platform for the most recent run, with when
@@ -660,6 +713,7 @@ def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok):
         "blogger": {"success": blogger_ok, "url": blogger_url, "timestamp": now},
         "facebook": {"success": facebook_ok, "timestamp": now},
         "pinterest": {"success": pinterest_ok, "timestamp": now},
+        "instagram": {"success": instagram_ok, "timestamp": now},
     }
     with open(STATUS_FILE, "w") as f:
         json.dump(status, f, indent=2)
@@ -744,7 +798,7 @@ def main():
         # instead of silently keeping yesterday's green tick.
         print(f"Run failed before publishing: {e}")
         try:
-            save_status(blogger_ok=False, blogger_url=None, facebook_ok=False, pinterest_ok=False)
+            save_status(blogger_ok=False, blogger_url=None, facebook_ok=False, pinterest_ok=False, instagram_ok=False)
             git_commit_and_push([STATUS_FILE], "Auto post: run failed before publishing")
         except Exception as status_err:
             print(f"Could not save failure status: {status_err}")
@@ -755,6 +809,10 @@ def main():
 
     print("Posting to Facebook Page...")
     facebook_ok = post_to_facebook_page(pin_hook, post_url)
+
+    print("Posting to Instagram...")
+    ig_caption = f"{pin_hook}\n\n{draft['title']}\n\nFull post: link in bio 🔗"
+    instagram_ok = post_to_instagram(ig_caption, hero_url)
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
@@ -787,7 +845,7 @@ def main():
 
     save_status(
         blogger_ok=True, blogger_url=post_url,
-        facebook_ok=facebook_ok, pinterest_ok=pinterest_ok,
+        facebook_ok=facebook_ok, pinterest_ok=pinterest_ok, instagram_ok=instagram_ok,
     )
     print("Committing history + status...")
     git_commit_and_push([HISTORY_FILE, STATUS_FILE], f"Auto post history: {draft['title']}")
