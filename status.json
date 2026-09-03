@@ -1,15 +1,15 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/09/how-to-turn-15-ikea-lack-table-into-500.html",
-    "timestamp": "2026-09-03T13:32:53.611556+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-09-03T18:33:08.635428+00:00"
   },
   "facebook": {
-    "success": true,
-    "timestamp": "2026-09-03T13:32:53.611556+00:00"
+    "success": false,
+    "timestamp": "2026-09-03T18:33:08.635428+00:00"
   },
   "pinterest": {
     "success": false,
-    "timestamp": "2026-09-03T13:32:53.611556+00:00"
+    "timestamp": "2026-09-03T18:33:08.635428+00:00"
   }
 }
