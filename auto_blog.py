@@ -590,10 +590,11 @@ def post_to_facebook_page(message, link):
     """
     Posts a link to the Facebook Page's feed. Never raises — if this fails
     or isn't configured, the post is still published everywhere else fine.
+    Returns True/False so the caller can record status for the dashboard.
     """
     if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
         print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook post.")
-        return
+        return False
 
     try:
         res = robust_request(
@@ -607,10 +608,33 @@ def post_to_facebook_page(message, link):
         )
         if res.ok:
             print("Posted to Facebook:", res.json().get("id"))
+            return True
         else:
             print(f"Facebook post failed ({res.status_code}): {res.text}")
+            return False
     except Exception as e:
         print(f"Facebook post failed (blog post is still published fine): {e}")
+        return False
+
+
+STATUS_FILE = "status.json"
+
+
+def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok):
+    """
+    Writes a small status.json the control panel reads to show a simple
+    green-tick/red-cross per platform for the most recent run, with when
+    it happened — instead of parsing raw workflow logs.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    status = {
+        "blogger": {"success": blogger_ok, "url": blogger_url, "timestamp": now},
+        "facebook": {"success": facebook_ok, "timestamp": now},
+        "pinterest": {"success": pinterest_ok, "timestamp": now},
+    }
+    with open(STATUS_FILE, "w") as f:
+        json.dump(status, f, indent=2)
+    return status
 
 
 def main():
@@ -622,74 +646,86 @@ def main():
 
     history = load_history()
 
-    print(f"Niche: {niche}")
-    print("Asking Gemini for a topic + article...")
-    draft = generate_draft(history, niche)
-    print("Topic chosen:", draft["title"])
+    try:
+        print(f"Niche: {niche}")
+        print("Asking Gemini for a topic + article...")
+        draft = generate_draft(history, niche)
+        print("Topic chosen:", draft["title"])
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    os.makedirs("images", exist_ok=True)
-    committed_paths = []
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        os.makedirs("images", exist_ok=True)
+        committed_paths = []
 
-    # --- Hero image (vertical, with the Pinterest text hook baked in) ---
-    print("Finding hero (Pinterest) photo...")
-    raw_hero = search_pexels_image(draft["image_prompt"], orientation="portrait")
-    pin_hook = draft.get("pin_hook", draft["title"])
-    hero_compressed = finalize_pin_image(raw_hero, pin_hook)
-    hero_filename = f"decor-{ts}-hero.webp"
-    hero_filepath = os.path.join("images", hero_filename)
-    with open(hero_filepath, "wb") as f:
-        f.write(hero_compressed)
-    committed_paths.append(hero_filepath)
-    print(f"Hero image compressed to {len(hero_compressed) / 1024:.1f} KB")
+        # --- Hero image (vertical, with the Pinterest text hook baked in) ---
+        print("Finding hero (Pinterest) photo...")
+        raw_hero = search_pexels_image(draft["image_prompt"], orientation="portrait")
+        pin_hook = draft.get("pin_hook", draft["title"])
+        hero_compressed = finalize_pin_image(raw_hero, pin_hook)
+        hero_filename = f"decor-{ts}-hero.webp"
+        hero_filepath = os.path.join("images", hero_filename)
+        with open(hero_filepath, "wb") as f:
+            f.write(hero_compressed)
+        committed_paths.append(hero_filepath)
+        print(f"Hero image compressed to {len(hero_compressed) / 1024:.1f} KB")
 
-    # --- Section images (horizontal, no text overlay, one per placeholder) ---
-    section_images = draft.get("section_images", [])
-    section_urls = {}
-    for i, section in enumerate(section_images):
-        token = section.get("token", f"IMG_{i+1}")
-        query = section.get("query", draft["image_prompt"])
-        print(f"Finding section photo for {token}: {query}")
-        raw_section = search_pexels_image(query, orientation="landscape")
-        section_compressed = compress_image(raw_section)
-        section_filename = f"decor-{ts}-{token.lower()}.webp"
-        section_filepath = os.path.join("images", section_filename)
-        with open(section_filepath, "wb") as f:
-            f.write(section_compressed)
-        committed_paths.append(section_filepath)
-        section_urls[token] = (
-            f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{section_filepath}"
+        # --- Section images (horizontal, no text overlay, one per placeholder) ---
+        section_images = draft.get("section_images", [])
+        section_urls = {}
+        for i, section in enumerate(section_images):
+            token = section.get("token", f"IMG_{i+1}")
+            query = section.get("query", draft["image_prompt"])
+            print(f"Finding section photo for {token}: {query}")
+            raw_section = search_pexels_image(query, orientation="landscape")
+            section_compressed = compress_image(raw_section)
+            section_filename = f"decor-{ts}-{token.lower()}.webp"
+            section_filepath = os.path.join("images", section_filename)
+            with open(section_filepath, "wb") as f:
+                f.write(section_compressed)
+            committed_paths.append(section_filepath)
+            section_urls[token] = (
+                f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{section_filepath}"
+            )
+
+        print("Committing images to the repo...")
+        git_commit_and_push(committed_paths, f"Auto post images: {draft['title']}")
+        time.sleep(8)
+
+        hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
+
+        # Swap [[IMG_n]] placeholders for real <img> tags.
+        body_html = draft["html"]
+        for token, url in section_urls.items():
+            img_tag = f'<img src="{url}" alt="" style="max-width:100%;height:auto;" />'
+            body_html = re.sub(rf"\[\[{re.escape(token)}\]\]", img_tag, body_html)
+        # Remove any leftover placeholders Gemini added without a matching section_images entry.
+        body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
+
+        full_html = (
+            f'<img src="{hero_url}" alt="" style="max-width:100%;height:auto;" />\n{body_html}'
         )
 
-    print("Committing images to the repo...")
-    git_commit_and_push(committed_paths, f"Auto post images: {draft['title']}")
-    time.sleep(8)
-
-    hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
-
-    # Swap [[IMG_n]] placeholders for real <img> tags.
-    body_html = draft["html"]
-    for token, url in section_urls.items():
-        img_tag = f'<img src="{url}" alt="" style="max-width:100%;height:auto;" />'
-        body_html = re.sub(rf"\[\[{re.escape(token)}\]\]", img_tag, body_html)
-    # Remove any leftover placeholders Gemini added without a matching section_images entry.
-    body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
-
-    full_html = (
-        f'<img src="{hero_url}" alt="" style="max-width:100%;height:auto;" />\n{body_html}'
-    )
-
-    print("Publishing to Blogger...")
-    access_token = get_access_token()
-    result = publish_post(access_token, draft["title"], full_html, draft.get("labels", []))
-    post_url = result.get("url")
-    print("Published:", post_url)
+        print("Publishing to Blogger...")
+        access_token = get_access_token()
+        result = publish_post(access_token, draft["title"], full_html, draft.get("labels", []))
+        post_url = result.get("url")
+        print("Published:", post_url)
+    except Exception as e:
+        # Blogger/generation itself failed — nothing got posted anywhere this
+        # run. Still record it so the dashboard shows a red cross for today
+        # instead of silently keeping yesterday's green tick.
+        print(f"Run failed before publishing: {e}")
+        try:
+            save_status(blogger_ok=False, blogger_url=None, facebook_ok=False, pinterest_ok=False)
+            git_commit_and_push([STATUS_FILE], "Auto post: run failed before publishing")
+        except Exception as status_err:
+            print(f"Could not save failure status: {status_err}")
+        raise
 
     print("Notifying Google Indexing API...")
     submit_url_for_indexing(post_url)
 
     print("Posting to Facebook Page...")
-    post_to_facebook_page(pin_hook, post_url)
+    facebook_ok = post_to_facebook_page(pin_hook, post_url)
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
@@ -699,13 +735,12 @@ def main():
         "url": post_url,
     })
     save_history(history)
-    print("Committing history...")
-    git_commit_and_push([HISTORY_FILE], f"Auto post history: {draft['title']}")
 
     # Pinterest is posted last and wrapped in try/except on purpose: if this
     # fails for any reason, the Blogger post has already gone live and should
     # NOT be rolled back or treated as a failed run.
     print("Posting to Pinterest...")
+    pinterest_ok = False
     try:
         pinterest_token = get_pinterest_access_token()
         pin_result = create_pinterest_pin(
@@ -717,8 +752,16 @@ def main():
             image_url=hero_url,
         )
         print("Pinned:", pin_result.get("id"))
+        pinterest_ok = True
     except Exception as e:
         print(f"Pinterest post failed (blog post is still published fine): {e}")
+
+    save_status(
+        blogger_ok=True, blogger_url=post_url,
+        facebook_ok=facebook_ok, pinterest_ok=pinterest_ok,
+    )
+    print("Committing history + status...")
+    git_commit_and_push([HISTORY_FILE, STATUS_FILE], f"Auto post history: {draft['title']}")
 
 
 if __name__ == "__main__":
