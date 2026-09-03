@@ -72,7 +72,12 @@ GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo
 # Model name — Google updates these periodically. If a run starts failing
 # with a 404 "model not found" error, check the current name in Google AI
 # Studio and update below (or set GEMINI_TEXT_MODEL as an env var/config value).
-TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.6-flash")
+TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.7-flash")
+
+# If TEXT_MODEL is overloaded/unavailable across all its retries, we fall
+# back through these proven models in order rather than failing the run.
+FALLBACK_TEXT_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.6-flash")
+FALLBACK_TEXT_MODEL_2 = os.environ.get("GEMINI_FALLBACK_MODEL_2", "gemini-2.5-flash")
 
 HISTORY_FILE = "topics_history.json"
 CONFIG_FILE = "config.json"
@@ -243,55 +248,76 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   ]
 }}"""
 
-    max_attempts = 4
-    wait_seconds = [15, 30, 60]  # delay before attempts 2, 3, 4
+    max_attempts = 3
+    wait_seconds = [20, 45]  # delay before attempts 2, 3 (per model)
 
-    for attempt in range(1, max_attempts + 1):
-        is_last_attempt = attempt == max_attempts
+    # If the primary model is overloaded/unavailable across all its retries,
+    # fall back to a second, proven-stable model rather than failing the run.
+    models_to_try = [TEXT_MODEL]
+    if FALLBACK_TEXT_MODEL and FALLBACK_TEXT_MODEL not in models_to_try:
+        models_to_try.append(FALLBACK_TEXT_MODEL)
+    if FALLBACK_TEXT_MODEL_2 and FALLBACK_TEXT_MODEL_2 not in models_to_try:
+        models_to_try.append(FALLBACK_TEXT_MODEL_2)
 
-        try:
-            res = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
-                params={"key": GEMINI_API_KEY},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=150,
-            )
-        except requests.exceptions.RequestException as e:
-            # Network-level failure (timeout, connection reset, DNS hiccup, etc.)
-            # — no HTTP response at all, so this can't be checked via status_code.
-            if is_last_attempt:
-                raise RuntimeError(f"Gemini request failed after {max_attempts} attempts (network error): {e}")
-            delay = wait_seconds[attempt - 1]
-            print(f"Gemini request failed ({e}), retrying in {delay}s "
-                  f"(attempt {attempt}/{max_attempts})...")
-            time.sleep(delay)
-            continue
+    last_error = None
+    for model_index, model in enumerate(models_to_try):
+        is_last_model = model_index == len(models_to_try) - 1
 
-        if res.ok:
-            text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-            text = text.replace("```json", "").replace("```", "").strip()
+        for attempt in range(1, max_attempts + 1):
+            is_last_attempt_for_model = attempt == max_attempts
+
             try:
-                return json.loads(text)
-            except json.JSONDecodeError as e:
-                if is_last_attempt:
-                    raise RuntimeError(f"Gemini returned invalid JSON after {max_attempts} attempts: {e}")
-                delay = wait_seconds[attempt - 1]
-                print(f"Gemini returned invalid JSON ({e}), retrying in {delay}s "
-                      f"(attempt {attempt}/{max_attempts})...")
-                time.sleep(delay)
+                res = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    params={"key": GEMINI_API_KEY},
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                    timeout=150,
+                )
+            except requests.exceptions.RequestException as e:
+                last_error = f"network error: {e}"
+                if is_last_attempt_for_model and is_last_model:
+                    raise RuntimeError(f"Gemini request failed on all models/attempts: {last_error}")
+                if not is_last_attempt_for_model:
+                    delay = wait_seconds[attempt - 1]
+                    print(f"[{model}] Gemini request failed ({e}), retrying in {delay}s "
+                          f"(attempt {attempt}/{max_attempts})...")
+                    time.sleep(delay)
                 continue
 
-        # Retry only on transient errors (overloaded / rate-limited / server hiccup).
-        # Fail immediately on anything else (e.g. bad API key, bad request).
-        transient = res.status_code in (429, 500, 502, 503, 504)
+            if res.ok:
+                text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                text = text.replace("```json", "").replace("```", "").strip()
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as e:
+                    last_error = f"invalid JSON: {e}"
+                    if is_last_attempt_for_model and is_last_model:
+                        raise RuntimeError(f"Gemini returned invalid JSON on all models/attempts: {last_error}")
+                    if not is_last_attempt_for_model:
+                        delay = wait_seconds[attempt - 1]
+                        print(f"[{model}] Gemini returned invalid JSON ({e}), retrying in {delay}s "
+                              f"(attempt {attempt}/{max_attempts})...")
+                        time.sleep(delay)
+                    continue
 
-        if not transient or is_last_attempt:
-            raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
+            # Retry only on transient errors (overloaded / rate-limited / server hiccup).
+            # Fail immediately on anything else (e.g. bad API key, bad request).
+            transient = res.status_code in (429, 500, 502, 503, 504)
+            last_error = f"HTTP {res.status_code}: {res.text[:200]}"
 
-        delay = wait_seconds[attempt - 1]
-        print(f"Gemini text generation failed ({res.status_code}), retrying in {delay}s "
-              f"(attempt {attempt}/{max_attempts})...")
-        time.sleep(delay)
+            if not transient:
+                raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
+
+            if is_last_attempt_for_model and is_last_model:
+                raise RuntimeError(f"Gemini text generation failed on all models/attempts: {last_error}")
+
+            if not is_last_attempt_for_model:
+                delay = wait_seconds[attempt - 1]
+                print(f"[{model}] Gemini text generation failed ({res.status_code}), retrying in {delay}s "
+                      f"(attempt {attempt}/{max_attempts})...")
+                time.sleep(delay)
+            else:
+                print(f"[{model}] exhausted all attempts, switching to fallback model...")
 
 
 def search_pexels_image(query, orientation="portrait"):
