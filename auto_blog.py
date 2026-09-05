@@ -163,14 +163,6 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
-# Every Gemini draft must contain these keys (non-empty) to be usable —
-# a valid JSON response missing one of these has caused crashes further
-# down the pipeline (e.g. KeyError: 'image_prompt') when a fallback model
-# returns a slightly different shape. Treated the same as invalid JSON:
-# it triggers a retry / fallback to the next model instead of crashing.
-REQUIRED_DRAFT_KEYS = ["title", "pin_hook", "labels", "html", "image_prompt"]
-
-
 def generate_draft(history, niche):
     recent_titles = [h["title"] for h in history[-50:]]
 
@@ -306,18 +298,14 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                 text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
                 text = text.replace("```json", "").replace("```", "").strip()
                 try:
-                    draft = json.loads(text)
-                    missing = [k for k in REQUIRED_DRAFT_KEYS if not draft.get(k)]
-                    if missing:
-                        raise ValueError(f"missing required field(s): {', '.join(missing)}")
-                    return draft
-                except (json.JSONDecodeError, ValueError) as e:
-                    last_error = f"invalid draft: {e}"
+                    return json.loads(text)
+                except json.JSONDecodeError as e:
+                    last_error = f"invalid JSON: {e}"
                     if is_last_attempt_for_model and is_last_model:
-                        raise RuntimeError(f"Gemini returned an invalid/incomplete draft on all models/attempts: {last_error}")
+                        raise RuntimeError(f"Gemini returned invalid JSON on all models/attempts: {last_error}")
                     if not is_last_attempt_for_model:
                         delay = wait_seconds[attempt - 1]
-                        print(f"[{model}] Gemini returned an invalid/incomplete draft ({e}), retrying in {delay}s "
+                        print(f"[{model}] Gemini returned invalid JSON ({e}), retrying in {delay}s "
                               f"(attempt {attempt}/{max_attempts})...")
                         time.sleep(delay)
                     continue
@@ -399,6 +387,28 @@ def _load_bold_font(size):
     return ImageFont.load_default()
 
 
+def crop_to_ratio(img, target_ratio=2 / 3):
+    """
+    Center-crops an image to a fixed width:height ratio (default 2:3, Pinterest's
+    recommended portrait ratio). Ensures every hero image has identical
+    proportions regardless of what shape photo Pexels returned, so link
+    previews on Facebook/Instagram/etc. crop it consistently every time.
+    """
+    w, h = img.size
+    current_ratio = w / h
+    if current_ratio > target_ratio:
+        # Image is too wide for the target ratio — crop the sides.
+        new_w = int(h * target_ratio)
+        left = (w - new_w) // 2
+        img = img.crop((left, 0, left + new_w, h))
+    else:
+        # Image is too tall for the target ratio — crop top/bottom.
+        new_h = int(w / target_ratio)
+        top = (h - new_h) // 2
+        img = img.crop((0, top, w, top + new_h))
+    return img
+
+
 def add_pin_text(image_bytes, hook_text):
     """Overlay a bold Pinterest-style text banner near the top of the image."""
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
@@ -425,8 +435,15 @@ def add_pin_text(image_bytes, hook_text):
     return img
 
 
-def finalize_pin_image(raw_image_bytes, hook_text, max_width=1200, quality=78):
-    img_with_text = add_pin_text(raw_image_bytes, hook_text)
+def finalize_pin_image(raw_image_bytes, hook_text, max_width=1200, quality=78, target_ratio=2 / 3):
+    img = Image.open(BytesIO(raw_image_bytes))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    img = crop_to_ratio(img, target_ratio)
+    cropped_bytes_io = BytesIO()
+    img.save(cropped_bytes_io, format="PNG")  # lossless intermediate before text overlay
+
+    img_with_text = add_pin_text(cropped_bytes_io.getvalue(), hook_text)
     if img_with_text.width > max_width:
         ratio = max_width / img_with_text.width
         img_with_text = img_with_text.resize(
@@ -753,8 +770,7 @@ def main():
 
         # --- Hero image (vertical, with the Pinterest text hook baked in) ---
         print("Finding hero (Pinterest) photo...")
-        image_prompt = draft.get("image_prompt") or draft.get("pin_hook") or draft["title"]
-        raw_hero = search_pexels_image(image_prompt, orientation="portrait")
+        raw_hero = search_pexels_image(draft["image_prompt"], orientation="portrait")
         pin_hook = draft.get("pin_hook", draft["title"])
         hero_compressed = finalize_pin_image(raw_hero, pin_hook)
         hero_filename = f"decor-{ts}-hero.webp"
@@ -764,12 +780,25 @@ def main():
         committed_paths.append(hero_filepath)
         print(f"Hero image compressed to {len(hero_compressed) / 1024:.1f} KB")
 
+        # --- Instagram-optimized image (4:5, Instagram's recommended feed
+        # ratio) — cropped from the same source photo, with its own text
+        # overlay sized/positioned for this canvas rather than just cropping
+        # the already-finished 2:3 hero (which would risk cutting the banner).
+        print("Preparing Instagram-optimized image (4:5)...")
+        ig_compressed = finalize_pin_image(raw_hero, pin_hook, target_ratio=4 / 5)
+        ig_filename = f"decor-{ts}-instagram.webp"
+        ig_filepath = os.path.join("images", ig_filename)
+        with open(ig_filepath, "wb") as f:
+            f.write(ig_compressed)
+        committed_paths.append(ig_filepath)
+        print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
+
         # --- Section images (horizontal, no text overlay, one per placeholder) ---
         section_images = draft.get("section_images", [])
         section_urls = {}
         for i, section in enumerate(section_images):
             token = section.get("token", f"IMG_{i+1}")
-            query = section.get("query", image_prompt)
+            query = section.get("query", draft["image_prompt"])
             print(f"Finding section photo for {token}: {query}")
             raw_section = search_pexels_image(query, orientation="landscape")
             section_compressed = compress_image(raw_section)
@@ -787,11 +816,24 @@ def main():
         time.sleep(8)
 
         hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
+        ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
 
-        # Swap [[IMG_n]] placeholders for real <img> tags.
+        # Swap [[IMG_n]] placeholders for section images. These are rendered
+        # as a div with a CSS background-image (not a real <img> tag) on
+        # purpose: Pinterest's RSS auto-publish creates a Pin for every
+        # <img src="..."> it finds in the post body, which was turning each
+        # article into 4 pins (hero + 3 sections) of mismatched sizes.
+        # Background-image divs display identically but aren't picked up by
+        # that scraper, so only the intentional hero <img> gets pinned.
         body_html = draft["html"]
         for token, url in section_urls.items():
-            img_tag = f'<img src="{url}" alt="" style="max-width:100%;height:auto;" />'
+            img_tag = (
+                f'<div role="img" aria-label="" '
+                f'style="width:100%;max-width:100%;aspect-ratio:4/3;'
+                f'background-image:url(\'{url}\');background-size:cover;'
+                f'background-position:center;border-radius:10px;'
+                f'box-shadow:0 2px 10px rgba(0,0,0,0.12);margin:20px 0;"></div>'
+            )
             body_html = re.sub(rf"\[\[{re.escape(token)}\]\]", img_tag, body_html)
         # Remove any leftover placeholders Gemini added without a matching section_images entry.
         body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
@@ -825,7 +867,7 @@ def main():
 
     print("Posting to Instagram...")
     ig_caption = f"{pin_hook}\n\n{draft['title']}\n\nFull post: link in bio 🔗"
-    instagram_ok = post_to_instagram(ig_caption, hero_url)
+    instagram_ok = post_to_instagram(ig_caption, ig_image_url)
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
