@@ -163,6 +163,14 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
+# Every Gemini draft must contain these keys (non-empty) to be usable —
+# a valid JSON response missing one of these has caused crashes further
+# down the pipeline (e.g. KeyError: 'image_prompt') when a fallback model
+# returns a slightly different shape. Treated the same as invalid JSON:
+# it triggers a retry / fallback to the next model instead of crashing.
+REQUIRED_DRAFT_KEYS = ["title", "pin_hook", "labels", "html", "image_prompt"]
+
+
 def generate_draft(history, niche):
     recent_titles = [h["title"] for h in history[-50:]]
 
@@ -298,14 +306,18 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                 text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
                 text = text.replace("```json", "").replace("```", "").strip()
                 try:
-                    return json.loads(text)
-                except json.JSONDecodeError as e:
-                    last_error = f"invalid JSON: {e}"
+                    draft = json.loads(text)
+                    missing = [k for k in REQUIRED_DRAFT_KEYS if not draft.get(k)]
+                    if missing:
+                        raise ValueError(f"missing required field(s): {', '.join(missing)}")
+                    return draft
+                except (json.JSONDecodeError, ValueError) as e:
+                    last_error = f"invalid draft: {e}"
                     if is_last_attempt_for_model and is_last_model:
-                        raise RuntimeError(f"Gemini returned invalid JSON on all models/attempts: {last_error}")
+                        raise RuntimeError(f"Gemini returned an invalid/incomplete draft on all models/attempts: {last_error}")
                     if not is_last_attempt_for_model:
                         delay = wait_seconds[attempt - 1]
-                        print(f"[{model}] Gemini returned invalid JSON ({e}), retrying in {delay}s "
+                        print(f"[{model}] Gemini returned an invalid/incomplete draft ({e}), retrying in {delay}s "
                               f"(attempt {attempt}/{max_attempts})...")
                         time.sleep(delay)
                     continue
@@ -741,7 +753,8 @@ def main():
 
         # --- Hero image (vertical, with the Pinterest text hook baked in) ---
         print("Finding hero (Pinterest) photo...")
-        raw_hero = search_pexels_image(draft["image_prompt"], orientation="portrait")
+        image_prompt = draft.get("image_prompt") or draft.get("pin_hook") or draft["title"]
+        raw_hero = search_pexels_image(image_prompt, orientation="portrait")
         pin_hook = draft.get("pin_hook", draft["title"])
         hero_compressed = finalize_pin_image(raw_hero, pin_hook)
         hero_filename = f"decor-{ts}-hero.webp"
@@ -756,7 +769,7 @@ def main():
         section_urls = {}
         for i, section in enumerate(section_images):
             token = section.get("token", f"IMG_{i+1}")
-            query = section.get("query", draft["image_prompt"])
+            query = section.get("query", image_prompt)
             print(f"Finding section photo for {token}: {query}")
             raw_section = search_pexels_image(query, orientation="landscape")
             section_compressed = compress_image(raw_section)
