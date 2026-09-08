@@ -591,6 +591,35 @@ def get_pinterest_access_token():
     return data["access_token"]
 
 
+def build_pin_hashtags(labels, max_tags=5):
+    """Turns article labels into hashtags, e.g. 'thrift flip' -> '#ThriftFlip'."""
+    tags = []
+    for label in labels[:max_tags]:
+        tag = re.sub(r"[^a-zA-Z0-9 ]", "", label).title().replace(" ", "")
+        if tag and f"#{tag}" not in tags:
+            tags.append(f"#{tag}")
+    return " ".join(tags)
+
+
+def extract_pin_description(html, hashtags="", max_length=500):
+    """
+    Pulls plain text from the article's opening <p> (the hook paragraph)
+    to use as the Pinterest pin description — a genuine excerpt of the
+    content, not just a repeat of the title or the on-image text overlay.
+    Hashtags (if provided) are appended at the end, within the length limit.
+    """
+    match = re.search(r"<p>(.*?)</p>", html, re.IGNORECASE | re.DOTALL)
+    text = match.group(1) if match else html
+    text = re.sub(r"<[^>]+>", "", text)  # strip any remaining HTML tags
+    text = re.sub(r"\s+", " ", text).strip()
+
+    suffix = f" {hashtags}" if hashtags else ""
+    excerpt_limit = max_length - len(suffix)
+    if len(text) > excerpt_limit:
+        text = text[:excerpt_limit].rsplit(" ", 1)[0] + "…"
+    return text + suffix
+
+
 def create_pinterest_pin(access_token, board_id, title, description, link, image_url):
     res = robust_request(
         "POST", "https://api.pinterest.com/v5/pins",
@@ -862,11 +891,15 @@ def main():
     print("Notifying Google Indexing API...")
     submit_url_for_indexing(post_url)
 
+    pin_hashtags = build_pin_hashtags(draft.get("labels", []))
+    social_description = extract_pin_description(draft["html"])
+
     print("Posting to Facebook Page...")
-    facebook_ok = post_to_facebook_page(pin_hook, post_url)
+    fb_message = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}"
+    facebook_ok = post_to_facebook_page(fb_message, post_url)
 
     print("Posting to Instagram...")
-    ig_caption = f"{pin_hook}\n\n{draft['title']}\n\nFull post: link in bio 🔗"
+    ig_caption = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}\n\nFull post: link in bio 🔗"
     instagram_ok = post_to_instagram(ig_caption, ig_image_url)
 
     # History (with URL, for future internal linking) is saved and committed
@@ -888,8 +921,8 @@ def main():
         pin_result = create_pinterest_pin(
             pinterest_token,
             board_id=PINTEREST_BOARD_ID,
-            title=pin_hook,
-            description=draft["title"],
+            title=draft["title"],
+            description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
             link=post_url,
             image_url=hero_url,
         )
