@@ -492,11 +492,17 @@ def get_access_token():
     return res.json()["access_token"]
 
 
-def publish_post(access_token, title, html, labels):
+def publish_post(access_token, title, html, labels, search_description=None):
+    payload = {"title": title, "content": html, "labels": labels}
+    if search_description:
+        # Blogger's "search description" becomes the page's meta description
+        # (and og:description), which is what shows up as the snippet in
+        # Google search results — without this, Blogger just guesses one.
+        payload["searchDescription"] = search_description[:150]
     res = robust_request(
         "POST", f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/posts/",
         headers={"Authorization": f"Bearer {access_token}"},
-        json={"title": title, "content": html, "labels": labels},
+        json=payload,
         timeout=60,
     )
     if not res.ok:
@@ -680,6 +686,37 @@ def submit_url_for_indexing(url):
         print(f"Indexing API submission failed (post still published fine): {e}")
 
 
+def check_meta_token_health():
+    """
+    Quick pre-flight check for the Facebook/Instagram Page Access Token,
+    run before attempting to post. Catches an expired/invalidated token
+    early with a clear, actionable message — instead of only finding out
+    via a buried OAuthException deep in the Facebook/Instagram post calls.
+    """
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("[token health] FACEBOOK_PAGE_ACCESS_TOKEN not set — Facebook/Instagram will be skipped.")
+        return False
+    try:
+        res = requests.get(
+            "https://graph.facebook.com/me",
+            params={"fields": "id,name", "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+            timeout=15,
+        )
+        if res.ok:
+            print(f"[token health] Facebook/Instagram Page token OK ({res.json().get('name')}).")
+            return True
+        print(f"[token health] Facebook/Instagram Page token looks INVALID: {res.text}")
+        print("[token health] Fix: Graph API Explorer -> generate a new User Token with the usual "
+              "7 permissions -> Extend Access Token in the Access Token Debugger -> "
+              "run me/accounts?fields=name,access_token,instagram_business_account with that extended "
+              "token -> copy the returned access_token into BOTH FACEBOOK_PAGE_ACCESS_TOKEN and "
+              "INSTAGRAM_ACCESS_TOKEN secrets.")
+        return False
+    except Exception as e:
+        print(f"[token health] Could not verify Facebook/Instagram token: {e}")
+        return False
+
+
 def post_to_facebook_page(message, link):
     """
     Posts a link to the Facebook Page's feed. Never raises — if this fails
@@ -837,7 +874,8 @@ def main():
                 f.write(section_compressed)
             committed_paths.append(section_filepath)
             section_urls[token] = (
-                f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{section_filepath}"
+                f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{section_filepath}",
+                query,
             )
 
         print("Committing images to the repo...")
@@ -855,9 +893,9 @@ def main():
         # Background-image divs display identically but aren't picked up by
         # that scraper, so only the intentional hero <img> gets pinned.
         body_html = draft["html"]
-        for token, url in section_urls.items():
+        for token, (url, query) in section_urls.items():
             img_tag = (
-                f'<div role="img" aria-label="" '
+                f'<div role="img" aria-label="{query}" '
                 f'style="width:100%;max-width:100%;aspect-ratio:4/3;'
                 f'background-image:url(\'{url}\');background-size:cover;'
                 f'background-position:center;border-radius:10px;'
@@ -868,12 +906,16 @@ def main():
         body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
 
         full_html = (
-            f'<img src="{hero_url}" alt="" style="max-width:100%;height:auto;" />\n{body_html}'
+            f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n{body_html}'
         )
+        social_description = extract_pin_description(draft["html"])
 
         print("Publishing to Blogger...")
         access_token = get_access_token()
-        result = publish_post(access_token, draft["title"], full_html, draft.get("labels", []))
+        result = publish_post(
+            access_token, draft["title"], full_html, draft.get("labels", []),
+            search_description=social_description,
+        )
         post_url = result.get("url")
         print("Published:", post_url)
     except Exception as e:
@@ -892,15 +934,20 @@ def main():
     submit_url_for_indexing(post_url)
 
     pin_hashtags = build_pin_hashtags(draft.get("labels", []))
-    social_description = extract_pin_description(draft["html"])
 
-    print("Posting to Facebook Page...")
-    fb_message = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}"
-    facebook_ok = post_to_facebook_page(fb_message, post_url)
+    meta_token_ok = check_meta_token_health()
+    if not meta_token_ok:
+        print("Skipping Facebook + Instagram posting this run — see the health check message above.")
+        facebook_ok = False
+        instagram_ok = False
+    else:
+        print("Posting to Facebook Page...")
+        fb_message = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}"
+        facebook_ok = post_to_facebook_page(fb_message, post_url)
 
-    print("Posting to Instagram...")
-    ig_caption = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}\n\nFull post: link in bio 🔗"
-    instagram_ok = post_to_instagram(ig_caption, ig_image_url)
+        print("Posting to Instagram...")
+        ig_caption = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}\n\nFull post: link in bio 🔗"
+        instagram_ok = post_to_instagram(ig_caption, ig_image_url)
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
