@@ -979,7 +979,7 @@ def main():
         facebook_ok = post_to_facebook_page(fb_message, post_url)
 
         print("Posting to Instagram...")
-        ig_caption = f"{draft['title']}\n\n{social_description} Full post: link in bio 🔗\n\n{pin_hashtags}"
+        ig_caption = f"{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{pin_hashtags}"
         instagram_ok = post_to_instagram(ig_caption, ig_image_url)
 
     # History (with URL, for future internal linking) is saved and committed
