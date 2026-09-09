@@ -868,6 +868,20 @@ def main():
         committed_paths.append(ig_filepath)
         print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
 
+        # --- Facebook-optimized image (1.91:1 landscape — Facebook's actual
+        # recommended link-preview ratio). Cropping the tall portrait hero
+        # down to this ratio would leave only a thin strip, so we fetch a
+        # genuinely landscape source photo instead, with its own text overlay.
+        print("Preparing Facebook-optimized image (1.91:1)...")
+        raw_fb = search_pexels_image(draft["image_prompt"], orientation="landscape")
+        fb_compressed = finalize_pin_image(raw_fb, pin_hook, target_ratio=1.91)
+        fb_filename = f"decor-{ts}-fb.webp"
+        fb_filepath = os.path.join("images", fb_filename)
+        with open(fb_filepath, "wb") as f:
+            f.write(fb_compressed)
+        committed_paths.append(fb_filepath)
+        print(f"Facebook image compressed to {len(fb_compressed) / 1024:.1f} KB")
+
 
 
         # --- Section images (horizontal, no text overlay, one per placeholder) ---
@@ -895,6 +909,7 @@ def main():
 
         hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
         ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
+        fb_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{fb_filepath}"
 
 
         # Swap [[IMG_n]] placeholders for section images. These are rendered
@@ -921,7 +936,7 @@ def main():
         # (Blogger uses the first <img> in the post body for that) — this is
         # what Facebook's link-share card shows. display:none keeps it
         # invisible to actual readers, who see only the normal hero below.
-        hidden_og_img = f'<img src="{ig_image_url}" alt="" style="display:none;" />\n'
+        hidden_og_img = f'<img src="{fb_image_url}" alt="" style="display:none;" />\n'
         full_html = (
             hidden_og_img +
             f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n{body_html}'
