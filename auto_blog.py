@@ -717,13 +717,14 @@ def check_meta_token_health():
         return False
 
 
-def post_to_facebook_page(message, link, image_url):
+def post_to_facebook_page(message, link):
     """
-    Posts a photo directly to the Facebook Page's feed, with the article's
-    URL included as plain text in the caption (Facebook auto-linkifies
-    plain URLs in post text, so it's still tappable — no link-share/og:image
-    scraping needed, which means we control the exact image shown instead of
-    whatever ratio the blog page's og:image happens to be).
+    Posts a link to the Facebook Page's feed — the whole preview card
+    (image + headline) is clickable straight through to the blog post,
+    which matters more here than exact image control since driving clicks
+    is the whole point. Facebook builds the card from the page's og:image,
+    which we control separately via a hidden square image placed first in
+    the post's HTML (see main()).
     Never raises — if this fails or isn't configured, the post is still
     published everywhere else fine. Returns True/False for the dashboard.
     """
@@ -731,14 +732,12 @@ def post_to_facebook_page(message, link, image_url):
         print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook post.")
         return False
 
-    full_caption = f"{message}\n\n{link}"
-
     try:
         res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/photos",
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/feed",
             data={
-                "url": image_url,
-                "caption": full_caption,
+                "message": message,
+                "link": link,
                 "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
             },
             timeout=30,
@@ -865,6 +864,18 @@ def main():
         committed_paths.append(ig_filepath)
         print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
 
+        # --- Facebook-optimized image (1:1 square) — used as the hidden
+        # og:image for Facebook's link-share preview card (see full_html
+        # below). Cropped from the same source photo, own text overlay.
+        print("Preparing Facebook-optimized image (1:1)...")
+        fb_compressed = finalize_pin_image(raw_hero, pin_hook, target_ratio=1)
+        fb_filename = f"decor-{ts}-fb.webp"
+        fb_filepath = os.path.join("images", fb_filename)
+        with open(fb_filepath, "wb") as f:
+            f.write(fb_compressed)
+        committed_paths.append(fb_filepath)
+        print(f"Facebook image compressed to {len(fb_compressed) / 1024:.1f} KB")
+
         # --- Section images (horizontal, no text overlay, one per placeholder) ---
         section_images = draft.get("section_images", [])
         section_urls = {}
@@ -890,6 +901,7 @@ def main():
 
         hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
         ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
+        fb_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{fb_filepath}"
 
         # Swap [[IMG_n]] placeholders for section images. These are rendered
         # as a div with a CSS background-image (not a real <img> tag) on
@@ -911,7 +923,13 @@ def main():
         # Remove any leftover placeholders Gemini added without a matching section_images entry.
         body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
 
+        # Hidden square image placed FIRST so it becomes the page's og:image
+        # (Blogger uses the first <img> in the post body for that) — this is
+        # what Facebook's link-share card shows. display:none keeps it
+        # invisible to actual readers, who see only the normal hero below.
+        hidden_og_img = f'<img src="{fb_image_url}" alt="" style="display:none;" />\n'
         full_html = (
+            hidden_og_img +
             f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n{body_html}'
         )
         social_description = extract_pin_description(draft["html"])
@@ -949,7 +967,7 @@ def main():
     else:
         print("Posting to Facebook Page...")
         fb_message = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}"
-        facebook_ok = post_to_facebook_page(fb_message, post_url, ig_image_url)
+        facebook_ok = post_to_facebook_page(fb_message, post_url)
 
         print("Posting to Instagram...")
         ig_caption = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}\n\nFull post: link in bio 🔗"
