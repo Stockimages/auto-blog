@@ -610,9 +610,11 @@ def build_pin_hashtags(labels, max_tags=5):
 def extract_pin_description(html, hashtags="", max_length=500):
     """
     Pulls plain text from the article's opening <p> (the hook paragraph)
-    to use as the Pinterest pin description — a genuine excerpt of the
-    content, not just a repeat of the title or the on-image text overlay.
-    Hashtags (if provided) are appended at the end, within the length limit.
+    to use as the Pinterest/Facebook/Instagram description — a genuine
+    excerpt of the content, not just a repeat of the title or the on-image
+    text overlay. Always ends with "..." (a "read more" cue), whether it
+    was truncated for length or not. Hashtags (if provided) are appended
+    after that, within the length limit.
     """
     match = re.search(r"<p>(.*?)</p>", html, re.IGNORECASE | re.DOTALL)
     text = match.group(1) if match else html
@@ -620,9 +622,11 @@ def extract_pin_description(html, hashtags="", max_length=500):
     text = re.sub(r"\s+", " ", text).strip()
 
     suffix = f" {hashtags}" if hashtags else ""
-    excerpt_limit = max_length - len(suffix)
+    # Reserve room for the "..." ending plus the hashtag suffix.
+    excerpt_limit = max_length - len(suffix) - 3
     if len(text) > excerpt_limit:
-        text = text[:excerpt_limit].rsplit(" ", 1)[0] + "…"
+        text = text[:excerpt_limit].rsplit(" ", 1)[0]
+    text = text.rstrip(" .…") + "..."
     return text + suffix
 
 
@@ -864,17 +868,7 @@ def main():
         committed_paths.append(ig_filepath)
         print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
 
-        # --- Facebook-optimized image (1:1 square) — used as the hidden
-        # og:image for Facebook's link-share preview card (see full_html
-        # below). Cropped from the same source photo, own text overlay.
-        print("Preparing Facebook-optimized image (1:1)...")
-        fb_compressed = finalize_pin_image(raw_hero, pin_hook, target_ratio=1)
-        fb_filename = f"decor-{ts}-fb.webp"
-        fb_filepath = os.path.join("images", fb_filename)
-        with open(fb_filepath, "wb") as f:
-            f.write(fb_compressed)
-        committed_paths.append(fb_filepath)
-        print(f"Facebook image compressed to {len(fb_compressed) / 1024:.1f} KB")
+
 
         # --- Section images (horizontal, no text overlay, one per placeholder) ---
         section_images = draft.get("section_images", [])
@@ -901,7 +895,7 @@ def main():
 
         hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
         ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
-        fb_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{fb_filepath}"
+
 
         # Swap [[IMG_n]] placeholders for section images. These are rendered
         # as a div with a CSS background-image (not a real <img> tag) on
@@ -927,7 +921,7 @@ def main():
         # (Blogger uses the first <img> in the post body for that) — this is
         # what Facebook's link-share card shows. display:none keeps it
         # invisible to actual readers, who see only the normal hero below.
-        hidden_og_img = f'<img src="{fb_image_url}" alt="" style="display:none;" />\n'
+        hidden_og_img = f'<img src="{ig_image_url}" alt="" style="display:none;" />\n'
         full_html = (
             hidden_og_img +
             f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n{body_html}'
@@ -970,7 +964,7 @@ def main():
         facebook_ok = post_to_facebook_page(fb_message, post_url)
 
         print("Posting to Instagram...")
-        ig_caption = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}\n\nFull post: link in bio 🔗"
+        ig_caption = f"{draft['title']}\n\n{social_description} Full post: link in bio 🔗\n\n{pin_hashtags}"
         instagram_ok = post_to_instagram(ig_caption, ig_image_url)
 
     # History (with URL, for future internal linking) is saved and committed
