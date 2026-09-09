@@ -717,22 +717,28 @@ def check_meta_token_health():
         return False
 
 
-def post_to_facebook_page(message, link):
+def post_to_facebook_page(message, link, image_url):
     """
-    Posts a link to the Facebook Page's feed. Never raises — if this fails
-    or isn't configured, the post is still published everywhere else fine.
-    Returns True/False so the caller can record status for the dashboard.
+    Posts a photo directly to the Facebook Page's feed, with the article's
+    URL included as plain text in the caption (Facebook auto-linkifies
+    plain URLs in post text, so it's still tappable — no link-share/og:image
+    scraping needed, which means we control the exact image shown instead of
+    whatever ratio the blog page's og:image happens to be).
+    Never raises — if this fails or isn't configured, the post is still
+    published everywhere else fine. Returns True/False for the dashboard.
     """
     if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
         print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook post.")
         return False
 
+    full_caption = f"{message}\n\n{link}"
+
     try:
         res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/feed",
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/photos",
             data={
-                "message": message,
-                "link": link,
+                "url": image_url,
+                "caption": full_caption,
                 "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
             },
             timeout=30,
@@ -943,7 +949,7 @@ def main():
     else:
         print("Posting to Facebook Page...")
         fb_message = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}"
-        facebook_ok = post_to_facebook_page(fb_message, post_url)
+        facebook_ok = post_to_facebook_page(fb_message, post_url, ig_image_url)
 
         print("Posting to Instagram...")
         ig_caption = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}\n\nFull post: link in bio 🔗"
