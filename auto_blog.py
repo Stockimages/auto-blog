@@ -30,6 +30,8 @@ import subprocess
 import textwrap
 import random
 import time
+import smtplib
+from email.mime.text import MIMEText
 from io import BytesIO
 from datetime import datetime, timezone
 
@@ -65,6 +67,13 @@ PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
 # Facebook Page — auto-posts a link to the Page right after each Blogger post.
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
+
+# Phone notification (via Gmail App Password + SMTP) — sends a summary
+# email to your own inbox after each run, so a push notification shows up
+# on your phone even without touching the Blogger OAuth setup at all.
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
+NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", GMAIL_ADDRESS)
 
 # Instagram Business account — auto-posts the hero image right after each
 # Blogger post. INSTAGRAM_ACCESS_TOKEN is a Facebook Page Access Token
@@ -806,6 +815,29 @@ def post_to_instagram(caption, image_url):
 STATUS_FILE = "status.json"
 
 
+def send_phone_notification(subject, body):
+    """
+    Emails a short run summary to your own inbox via Gmail SMTP (App
+    Password), so a push notification shows up on your phone through the
+    Gmail app. Never raises — a notification failure should never break
+    or fail the actual posting run.
+    """
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD or not NOTIFY_EMAIL:
+        print("GMAIL_ADDRESS / GMAIL_APP_PASSWORD not set — skipping phone notification.")
+        return
+    try:
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = NOTIFY_EMAIL
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as server:
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_ADDRESS, [NOTIFY_EMAIL], msg.as_string())
+        print("Phone notification email sent.")
+    except Exception as e:
+        print(f"Could not send phone notification (non-fatal): {e}")
+
+
 def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok):
     """
     Writes a small status.json the control panel reads to show a simple
@@ -961,6 +993,10 @@ def main():
             git_commit_and_push([STATUS_FILE], "Auto post: run failed before publishing")
         except Exception as status_err:
             print(f"Could not save failure status: {status_err}")
+        send_phone_notification(
+            "❌ DecorVibe run FAILED",
+            f"The run failed before publishing anything.\n\nError: {e}",
+        )
         raise
 
     print("Notifying Google Indexing API...")
@@ -1017,6 +1053,18 @@ def main():
     )
     print("Committing history + status...")
     git_commit_and_push([HISTORY_FILE, STATUS_FILE], f"Auto post history: {draft['title']}")
+
+    def tick(ok):
+        return "✅" if ok else "❌"
+
+    send_phone_notification(
+        f"{tick(True)} DecorVibe posted: {draft['title'][:60]}",
+        f"{draft['title']}\n{post_url}\n\n"
+        f"Blogger: {tick(True)}\n"
+        f"Facebook: {tick(facebook_ok)}\n"
+        f"Instagram: {tick(instagram_ok)}\n"
+        f"Pinterest: {tick(pinterest_ok)}",
+    )
 
 
 if __name__ == "__main__":
