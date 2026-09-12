@@ -30,10 +30,10 @@
   .mark{font-size:22px; font-weight:900; flex-shrink:0;}
   .mark.ok{color:var(--ok);}
   .mark.bad{color:var(--bad);}
-  #connect{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px;}
-  #connect input{width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:7px;
+  #connect, #loginGate{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px;}
+  #connect input, #loginGate input{width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:7px;
     font-size:14px; margin-bottom:10px; font-family:inherit;}
-  #connect button{width:100%; padding:10px; border:none; border-radius:7px; background:#7C4B2C;
+  #connect button, #loginGate button{width:100%; padding:10px; border:none; border-radius:7px; background:#7C4B2C;
     color:#fff; font-weight:700; font-size:14px; cursor:pointer;}
   #connect .note{font-size:11px; color:var(--ink-soft); margin-top:10px; line-height:1.5;}
   #err{color:var(--bad); font-size:12px; margin-top:8px;}
@@ -46,7 +46,16 @@
 <div class="wrap">
   <h1>DecorVibe — Last Post Status</h1>
 
-  <div id="connect">
+  <div id="loginGate">
+    <label style="font-size:12px; font-weight:600; color:var(--ink-soft);">Username</label>
+    <input type="text" id="loginUser" placeholder="Username" autocomplete="off">
+    <label style="font-size:12px; font-weight:600; color:var(--ink-soft);">Password</label>
+    <input type="password" id="loginPass" placeholder="Password" autocomplete="off">
+    <button id="loginBtn">Login</button>
+    <div id="loginErr" style="color:var(--bad); font-size:12px; margin-top:8px;"></div>
+  </div>
+
+  <div id="connect" style="display:none;">
     <label style="font-size:12px; font-weight:600; color:var(--ink-soft);">GitHub Token</label>
     <input type="password" id="pat" placeholder="github_pat_...">
     <label style="font-size:12px; font-weight:600; color:var(--ink-soft);">Repo (owner/name)</label>
@@ -90,12 +99,50 @@
       <div class="mark" id="instagram-mark">—</div>
     </div>
     <a class="refresh" id="refreshLink">Refresh</a>
+    <a class="refresh" id="logoutLink" style="color:var(--bad);">Logout</a>
   </div>
 </div>
 
 <script>
 const API = "https://api.github.com";
 let pat = null, repo = null;
+
+const LOGIN_USER = "harisjawaid29";
+const LOGIN_PASS = "Tatti@123";
+
+function showLoggedInUI(){
+  document.getElementById('loginGate').style.display = 'none';
+  document.getElementById('connect').style.display = 'block';
+  const savedPat = localStorage.getItem('decorStatusPat');
+  const savedRepo = localStorage.getItem('decorStatusRepo');
+  if(savedPat && savedRepo){
+    document.getElementById('pat').value = savedPat;
+    document.getElementById('repo').value = savedRepo;
+    pat = savedPat; repo = savedRepo;
+    loadStatus();
+  }
+}
+
+document.getElementById('loginBtn').addEventListener('click', () => {
+  const user = document.getElementById('loginUser').value.trim();
+  const passVal = document.getElementById('loginPass').value;
+  if(user === LOGIN_USER && passVal === LOGIN_PASS){
+    localStorage.setItem('decorLoggedIn', 'true');
+    document.getElementById('loginErr').textContent = '';
+    showLoggedInUI();
+  } else {
+    document.getElementById('loginErr').textContent = 'Galat username ya password.';
+  }
+});
+
+document.getElementById('logoutLink').addEventListener('click', () => {
+  localStorage.removeItem('decorLoggedIn');
+  document.getElementById('statusPanel').style.display = 'none';
+  document.getElementById('connect').style.display = 'none';
+  document.getElementById('loginGate').style.display = 'block';
+  document.getElementById('loginUser').value = '';
+  document.getElementById('loginPass').value = '';
+});
 
 function fmt(iso){
   if(!iso) return "No data yet";
@@ -152,13 +199,8 @@ document.getElementById('connectBtn').addEventListener('click', () => {
 document.getElementById('refreshLink').addEventListener('click', loadStatus);
 
 window.addEventListener('load', () => {
-  const savedPat = localStorage.getItem('decorStatusPat');
-  const savedRepo = localStorage.getItem('decorStatusRepo');
-  if(savedPat && savedRepo){
-    document.getElementById('pat').value = savedPat;
-    document.getElementById('repo').value = savedRepo;
-    pat = savedPat; repo = savedRepo;
-    loadStatus();
+  if(localStorage.getItem('decorLoggedIn') === 'true'){
+    showLoggedInUI();
   }
 });
 </script>
