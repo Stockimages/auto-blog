@@ -297,7 +297,6 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "title": "a specific, honest, clickable title",
   "category": "EXACTLY one of the fixed categories listed above",
   "pin_hook": "...",
-  "labels": ["label1", "label2", "label3"],
   "html": "full article body as HTML, following every rule above",
   "image_prompt": "...",
   "section_images": [
@@ -922,10 +921,13 @@ def main():
             category = "General Decor"
         draft["category"] = category
 
-        # Make sure the category is always a real Blogger label on the post
-        # (first label), on top of whichever descriptive labels Gemini wrote.
-        existing_labels = draft.get("labels", []) or []
-        draft["labels"] = [category] + [l for l in existing_labels if l != category]
+        # Every post gets exactly ONE label: its category. This keeps the
+        # breadcrumb, the thumbnail badge, and the nav menu always in sync —
+        # no second "style" label (e.g. "Thrift Flip") that could make the
+        # breadcrumb show something other than the category a visitor just
+        # clicked into. Pinterest/Instagram hashtags will be category-based
+        # only as a result — an accepted trade-off.
+        draft["labels"] = [category]
         print("Category:", category)
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
