@@ -25,6 +25,7 @@ on a schedule, with no human interaction.
 import os
 import re
 import json
+import html
 import base64
 import subprocess
 import textwrap
@@ -280,6 +281,15 @@ quotes are the JSON string delimiter and will break the response.
    enough — sequential numbering, 2-3 total. Do not add more placeholders
    than you provide section_images for.
 
+6. QUICK FACTS: also provide total_cost (the final total from your budget
+   table, e.g. "$26"), time_estimate (e.g. "1 hour", "A weekend"), and
+   difficulty ("Easy", "Moderate", or "Advanced") — used for a quick-take
+   summary box at the top of the post.
+
+7. FAQ: write exactly 3 short, genuinely specific reader questions about
+   THIS project (not generic decor questions) with concise 1-2 sentence
+   answers. No quotation marks inside the question/answer text.
+
 Also write:
 - "pin_hook": a punchy, benefit- or curiosity-driven phrase, 5-8 words max,
   written like Pinterest pin text (e.g. "10 Thrift Flips That Look Expensive"),
@@ -297,6 +307,15 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "title": "a specific, honest, clickable title",
   "category": "EXACTLY one of the fixed categories listed above",
   "pin_hook": "...",
+  "hashtag_tags": ["3-5 short descriptive style/content tags for social hashtags only, e.g. thrift flip, diy, budget decor — these do NOT affect the site's category"],
+  "total_cost": "e.g. $26",
+  "time_estimate": "e.g. 1 hour",
+  "difficulty": "Easy, Moderate, or Advanced",
+  "faq": [
+    {{"question": "...", "answer": "..."}},
+    {{"question": "...", "answer": "..."}},
+    {{"question": "...", "answer": "..."}}
+  ],
   "html": "full article body as HTML, following every rule above",
   "image_prompt": "...",
   "section_images": [
@@ -500,6 +519,47 @@ def finalize_pin_image(raw_image_bytes, hook_text, max_width=1200, quality=78, t
         )
     out = BytesIO()
     img_with_text.save(out, format="WEBP", quality=quality)
+    return out.getvalue()
+
+
+def build_text_card(lines, size=(1080, 1350), bg_color=(45, 38, 32), accent_color=(176, 141, 87)):
+    """
+    Builds a plain solid-background slide with centered text — used for the
+    Instagram carousel's "quick take" and "link in bio" info slides. No
+    photo needed (no extra Pexels call), just PIL drawing text on a card.
+    `lines` is a list of (text, is_title) tuples; title lines get a larger
+    bold font and an accent-colored underline beneath them.
+    """
+    img = Image.new("RGB", size, bg_color)
+    draw = ImageDraw.Draw(img)
+
+    title_font = _load_bold_font(int(size[0] * 0.09))
+    body_font = _load_bold_font(int(size[0] * 0.05))
+
+    blocks = []
+    total_h = 0
+    for text, is_title in lines:
+        font = title_font if is_title else body_font
+        wrapped = textwrap.fill(text.upper() if is_title else text, width=18)
+        bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        blocks.append((wrapped, font, bbox, w, h, is_title))
+        total_h += h + 40
+
+    y = (size[1] - total_h) / 2
+    for wrapped, font, bbox, w, h, is_title in blocks:
+        x = (size[0] - w) / 2 - bbox[0]
+        draw.multiline_text((x, y - bbox[1]), wrapped, font=font, fill="white", align="center", spacing=10)
+        if is_title:
+            underline_y = y + h + 12
+            draw.rectangle(
+                [(size[0] - w) / 2, underline_y, (size[0] + w) / 2, underline_y + 4],
+                fill=accent_color,
+            )
+        y += h + 40
+
+    out = BytesIO()
+    img.save(out, format="WEBP", quality=82)
     return out.getvalue()
 
 
@@ -852,6 +912,77 @@ def post_to_instagram(caption, image_url):
         return False
 
 
+def _create_ig_carousel_child(image_url):
+    """Creates one carousel slide's media container (no caption on children)."""
+    res = robust_request(
+        "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+        data={
+            "image_url": image_url,
+            "is_carousel_item": "true",
+            "access_token": INSTAGRAM_ACCESS_TOKEN,
+        },
+        timeout=60,
+    )
+    if not res.ok:
+        raise RuntimeError(f"Carousel child creation failed ({res.status_code}): {res.text}")
+    return res.json()["id"]
+
+
+def post_to_instagram_carousel(caption, image_urls):
+    """
+    Posts a multi-slide Instagram carousel (2-10 public image URLs). Falls
+    back to a single-image post via post_to_instagram() using the first
+    image if fewer than 2 URLs are given, or if anything in the carousel
+    flow fails — so a carousel hiccup never costs the Instagram post
+    entirely, same philosophy as the rest of this script's social posting.
+    """
+    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
+        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram post.")
+        return False
+
+    if len(image_urls) < 2:
+        return post_to_instagram(caption, image_urls[0]) if image_urls else False
+
+    try:
+        child_ids = []
+        for url in image_urls:
+            child_ids.append(_create_ig_carousel_child(url))
+            time.sleep(2)
+
+        # Let all children finish processing before assembling the carousel.
+        time.sleep(8)
+
+        parent_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+            data={
+                "media_type": "CAROUSEL",
+                "children": ",".join(child_ids),
+                "caption": caption,
+                "access_token": INSTAGRAM_ACCESS_TOKEN,
+            },
+            timeout=60,
+        )
+        if not parent_res.ok:
+            raise RuntimeError(f"Carousel container failed ({parent_res.status_code}): {parent_res.text}")
+        creation_id = parent_res.json()["id"]
+
+        time.sleep(10)
+
+        publish_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
+            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if not publish_res.ok:
+            raise RuntimeError(f"Carousel publish failed ({publish_res.status_code}): {publish_res.text}")
+
+        print("Posted Instagram carousel:", publish_res.json().get("id"))
+        return True
+    except Exception as e:
+        print(f"Instagram carousel failed ({e}), falling back to single-image post...")
+        return post_to_instagram(caption, image_urls[0])
+
+
 STATUS_FILE = "status.json"
 
 
@@ -921,14 +1052,34 @@ def main():
             category = "General Decor"
         draft["category"] = category
 
-        # Every post gets exactly ONE label: its category. This keeps the
-        # breadcrumb, the thumbnail badge, and the nav menu always in sync —
-        # no second "style" label (e.g. "Thrift Flip") that could make the
-        # breadcrumb show something other than the category a visitor just
-        # clicked into. Pinterest/Instagram hashtags will be category-based
-        # only as a result — an accepted trade-off.
+        # Every post gets exactly ONE Blogger label: its category. This keeps
+        # the breadcrumb, the thumbnail badge, and the nav menu always in
+        # sync — no second "style" label (e.g. "Thrift Flip") that could make
+        # the breadcrumb show something other than the category a visitor
+        # just clicked into.
+        #
+        # Social hashtags are kept separate and richer on purpose: they use
+        # the category PLUS Gemini's descriptive "hashtag_tags" (e.g. "thrift
+        # flip", "diy"), so Pinterest/Instagram hashtag variety doesn't drop
+        # just because Blogger's on-site labeling was simplified.
+        hashtag_tags = draft.get("hashtag_tags", []) or []
+        draft["hashtag_labels"] = [category] + [t for t in hashtag_tags if t != category]
         draft["labels"] = [category]
         print("Category:", category)
+
+        # Quick-take fields, computed once here so both the on-page summary
+        # box and the Instagram carousel's info slide can reuse them.
+        # Raw values go into the image slide (PIL just draws plain text);
+        # escaped versions go into the HTML box (avoids breaking the markup
+        # if Gemini's text ever contains &, <, or >).
+        plain_word_count = len(re.sub(r"<[^>]+>", " ", draft["html"]).split())
+        reading_minutes = max(1, round(plain_word_count / 200))
+        total_cost_raw = draft.get("total_cost", "See breakdown below")
+        time_estimate_raw = draft.get("time_estimate", "A weekend")
+        difficulty_raw = draft.get("difficulty", "Easy")
+        total_cost = html.escape(total_cost_raw)
+        time_estimate = html.escape(time_estimate_raw)
+        difficulty = html.escape(difficulty_raw)
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         os.makedirs("images", exist_ok=True)
@@ -958,6 +1109,45 @@ def main():
             f.write(ig_compressed)
         committed_paths.append(ig_filepath)
         print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
+
+        # --- Extra Instagram carousel slides (quick-take card, a second
+        # hook photo, and a link-in-bio CTA card). No extra Pexels calls —
+        # the "photo" slide reuses raw_hero already downloaded above, and
+        # the two card slides are plain drawn backgrounds, so this stays
+        # free and doesn't add any new API dependency.
+        print("Preparing Instagram carousel slides (quick-take + CTA cards)...")
+        ig_slide2_compressed = build_text_card([
+            ("Quick Take", True),
+            (f"Cost: {total_cost_raw}", False),
+            (f"Time: {time_estimate_raw}", False),
+            (f"Difficulty: {difficulty_raw}", False),
+        ])
+        ig_slide2_filename = f"decor-{ts}-ig-quicktake.webp"
+        ig_slide2_filepath = os.path.join("images", ig_slide2_filename)
+        with open(ig_slide2_filepath, "wb") as f:
+            f.write(ig_slide2_compressed)
+        committed_paths.append(ig_slide2_filepath)
+
+        ig_slide3_compressed = finalize_pin_image(
+            raw_hero, "See The Full Tutorial", target_ratio=4 / 5
+        )
+        ig_slide3_filename = f"decor-{ts}-ig-tutorial.webp"
+        ig_slide3_filepath = os.path.join("images", ig_slide3_filename)
+        with open(ig_slide3_filepath, "wb") as f:
+            f.write(ig_slide3_compressed)
+        committed_paths.append(ig_slide3_filepath)
+
+        ig_slide4_compressed = build_text_card([
+            ("Want The Full Guide", True),
+            ("Tap the link in our bio", False),
+            ("for the full step-by-step", False),
+        ])
+        ig_slide4_filename = f"decor-{ts}-ig-cta.webp"
+        ig_slide4_filepath = os.path.join("images", ig_slide4_filename)
+        with open(ig_slide4_filepath, "wb") as f:
+            f.write(ig_slide4_compressed)
+        committed_paths.append(ig_slide4_filepath)
+        print("Instagram carousel slides ready.")
 
         # --- Facebook-optimized image (1.91:1 landscape — Facebook's actual
         # recommended link-preview ratio). Cropping the tall portrait hero
@@ -1000,6 +1190,9 @@ def main():
 
         hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
         ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
+        ig_slide2_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide2_filepath}"
+        ig_slide3_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide3_filepath}"
+        ig_slide4_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide4_filepath}"
         fb_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{fb_filepath}"
 
 
@@ -1023,6 +1216,69 @@ def main():
         # Remove any leftover placeholders Gemini added without a matching section_images entry.
         body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
 
+        # --- Quick-take summary box (cost/time/difficulty/reading time) ---
+        quick_take_html = (
+            '<div style="background:#f7f3ee;border-left:4px solid #b08d57;'
+            'padding:15px 20px;margin:15px 0;border-radius:6px;">'
+            f'<strong>Quick Take:</strong> Total cost: {total_cost} &bull; '
+            f'Time: {time_estimate} &bull; Difficulty: {difficulty} &bull; '
+            f'{reading_minutes} min read</div>'
+        )
+
+        # --- FAQ section + FAQPage schema (for Google rich-result eligibility) ---
+        faq_items = [
+            f for f in draft.get("faq", [])
+            if f.get("question") and f.get("answer")
+        ][:3]
+        faq_html = ""
+        faq_schema_html = ""
+        if faq_items:
+            faq_parts = ["<h2>Frequently Asked Questions</h2>"]
+            for item in faq_items:
+                q = html.escape(item["question"])
+                a = html.escape(item["answer"])
+                faq_parts.append(f"<h3>{q}</h3><p>{a}</p>")
+            faq_html = "\n".join(faq_parts)
+
+            faq_schema = {
+                "@context": "https://schema.org",
+                "@type": "FAQPage",
+                "mainEntity": [
+                    {
+                        "@type": "Question",
+                        "name": item["question"],
+                        "acceptedAnswer": {"@type": "Answer", "text": item["answer"]},
+                    }
+                    for item in faq_items
+                ],
+            }
+            faq_schema_html = (
+                '<script type="application/ld+json">'
+                f"{json.dumps(faq_schema, ensure_ascii=False)}</script>"
+            )
+
+        # --- Related posts (same category, most recent, excluding this one) ---
+        related = [
+            h for h in history
+            if h.get("category") == category and h.get("url")
+        ][-3:]
+        related_posts_html = ""
+        if related:
+            items = "".join(
+                f'<li><a href="{h["url"]}">{html.escape(h["title"])}</a></li>'
+                for h in reversed(related)
+            )
+            related_posts_html = f"<h2>You Might Also Like</h2><ul>{items}</ul>"
+
+        # --- Static author/trust bio (E-E-A-T signal, same on every post) ---
+        author_bio_html = (
+            '<div style="margin-top:30px;padding-top:20px;border-top:1px solid #ddd;'
+            'font-size:0.9em;color:#555;"><strong>About the Author:</strong> '
+            "Written by the DecorVibe team — real budget home-decor flips and "
+            "thrifted finds, tested and written up so you can recreate them "
+            "affordably.</div>"
+        )
+
         # Hidden square image placed FIRST so it becomes the page's og:image
         # (Blogger uses the first <img> in the post body for that) — this is
         # what Facebook's link-share card shows. display:none keeps it
@@ -1030,7 +1286,9 @@ def main():
         hidden_og_img = f'<img src="{fb_image_url}" alt="" style="display:none;" />\n'
         full_html = (
             hidden_og_img +
-            f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n{body_html}'
+            f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n'
+            f'{quick_take_html}\n{body_html}\n{related_posts_html}\n{faq_html}\n'
+            f'{author_bio_html}\n{faq_schema_html}'
         )
         social_description = extract_pin_description(draft["html"])
 
@@ -1061,7 +1319,7 @@ def main():
     print("Notifying Google Indexing API...")
     submit_url_for_indexing(post_url)
 
-    pin_hashtags = build_pin_hashtags(draft.get("labels", []))
+    pin_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []))
 
     meta_token_ok = check_meta_token_health()
     if not meta_token_ok:
@@ -1073,9 +1331,11 @@ def main():
         fb_message = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}"
         facebook_ok = post_to_facebook_page(fb_message, post_url)
 
-        print("Posting to Instagram...")
+        print("Posting to Instagram (carousel)...")
         ig_caption = f"{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{pin_hashtags}"
-        instagram_ok = post_to_instagram(ig_caption, ig_image_url)
+        instagram_ok = post_to_instagram_carousel(
+            ig_caption, [ig_image_url, ig_slide2_url, ig_slide3_url, ig_slide4_url]
+        )
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
