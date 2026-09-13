@@ -100,6 +100,22 @@ HISTORY_FILE = "topics_history.json"
 CONFIG_FILE = "config.json"
 DEFAULT_NICHE = "budget-friendly home decor"
 
+# Fixed set of categories that back the site's navigation menu (each one is
+# a real Blogger label with its own /search/label/<Category> page). Every
+# post must be filed under exactly one of these so the menu always leads
+# somewhere real. Spelling/capitalization here must exactly match the menu
+# links in Blogger's Layout > Top Navigation gadget.
+CATEGORIES = [
+    "Living Room",
+    "Bedroom",
+    "Kitchen",
+    "Bathroom",
+    "Small Spaces",
+    "Entryway",
+    "Outdoor",
+    "General Decor",
+]
+
 # Words/phrases that make AI writing sound canned. Gemini is told to avoid these.
 BANNED_PHRASES = [
     "elevate", "delve", "unlock", "unleash", "seamless", "seamlessly",
@@ -185,6 +201,17 @@ def generate_draft(history, niche):
 
     banned_list = ", ".join(f'"{w}"' for w in BANNED_PHRASES)
 
+    # Count how many past posts fell in each fixed category so we can nudge
+    # Gemini toward whichever categories are under-served, instead of every
+    # category naturally drifting toward whatever's easiest to write about.
+    category_counts = {c: 0 for c in CATEGORIES}
+    for h in history:
+        cat = h.get("category")
+        if cat in category_counts:
+            category_counts[cat] += 1
+    categories_by_need = sorted(CATEGORIES, key=lambda c: category_counts[c])
+    category_counts_str = ", ".join(f"{c}: {category_counts[c]}" for c in CATEGORIES)
+
     prompt = f"""You are a real person who runs a {niche} blog and personally writes every
 post. You've done these projects yourself, in your own home, on a real budget.
 Posts are shared to Pinterest automatically the moment they're published, so
@@ -195,6 +222,19 @@ Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
 Pick ONE fresh, specific, practical angle on {niche} that is not in that list.
+
+CATEGORY (required): every post on this site is filed under exactly ONE of
+these fixed categories, which is also the site's navigation menu — pick
+whichever one the topic genuinely belongs to:
+{json.dumps(CATEGORIES, ensure_ascii=False)}
+
+Current post count per category (so the site stays balanced instead of
+piling up in one category): {category_counts_str}.
+All else being equal, prefer a topic that fits one of the currently
+under-served categories — in order of most-needed first: {json.dumps(categories_by_need, ensure_ascii=False)}.
+But NEVER force a topic into the wrong category just to balance the count —
+pick the category the topic honestly belongs in, and if nothing fits well,
+use "General Decor".
 
 WRITING VOICE — this is the most important instruction:
 - Write like a real person talking to a friend, not like a content mill.
@@ -255,6 +295,7 @@ Also write:
 Return ONLY valid JSON. No markdown fences, no commentary before or after.
 {{
   "title": "a specific, honest, clickable title",
+  "category": "EXACTLY one of the fixed categories listed above",
   "pin_hook": "...",
   "labels": ["label1", "label2", "label3"],
   "html": "full article body as HTML, following every rule above",
@@ -871,6 +912,22 @@ def main():
         draft = generate_draft(history, niche)
         print("Topic chosen:", draft["title"])
 
+        # Safety net: if Gemini ever returns a category that isn't one of
+        # the fixed menu categories (typo, missing field, etc.), fall back
+        # to "General Decor" rather than publishing a post the nav menu
+        # can never surface.
+        category = draft.get("category")
+        if category not in CATEGORIES:
+            print(f"Category '{category}' not recognized, falling back to 'General Decor'.")
+            category = "General Decor"
+        draft["category"] = category
+
+        # Make sure the category is always a real Blogger label on the post
+        # (first label), on top of whichever descriptive labels Gemini wrote.
+        existing_labels = draft.get("labels", []) or []
+        draft["labels"] = [category] + [l for l in existing_labels if l != category]
+        print("Category:", category)
+
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         os.makedirs("images", exist_ok=True)
         committed_paths = []
@@ -1022,6 +1079,7 @@ def main():
     # AFTER publishing, now that we actually know the post's URL.
     history.append({
         "title": draft["title"],
+        "category": draft.get("category"),
         "date": datetime.now(timezone.utc).isoformat(),
         "url": post_url,
     })
