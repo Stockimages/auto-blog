@@ -331,9 +331,10 @@ Also write:
 - "pin_hook": a punchy, benefit- or curiosity-driven phrase, 5-8 words max,
   written like Pinterest pin text (e.g. "10 Thrift Flips That Look Expensive"),
   NOT a full sentence, no ending punctuation.
-- "image_prompt": 3-5 simple search keywords (not a sentence) for the vertical
-  HERO photo (this is the one shown on Pinterest) — e.g. "thrifted glass vase
-  living room". No brand names, no people's faces, no text.
+- "image_prompt": REQUIRED — 3-5 simple search keywords (not a sentence) for
+  the vertical HERO photo (this is the one shown on Pinterest) — e.g.
+  "thrifted glass vase living room". No brand names, no people's faces, no
+  text. This field must always be present in your JSON response.
 - "section_images": a list matching your [[IMG_n]] placeholders, each with a
   "token" (e.g. "IMG_1") and a "query" (3-5 keyword search terms for a real,
   horizontal photo matching that section of the article — no people's faces,
@@ -433,6 +434,87 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                 time.sleep(delay)
             else:
                 print(f"[{model}] exhausted all attempts, switching to fallback model...")
+
+
+def normalize_draft(draft):
+    """
+    Single place that guarantees every field the rest of this script reads
+    from `draft` is present and in a sane shape — so a future run where
+    Gemini omits or malforms ANY field degrades gracefully (falls back to a
+    safe default) instead of crashing the whole run with a KeyError or
+    AttributeError somewhere downstream.
+
+    This exists because that's exactly what happened twice already: once
+    with a malformed "faq" item, once with a missing "image_prompt". Rather
+    than adding a one-off guard at each crash site as new fields get added
+    to the prompt over time, every field is checked here, in one place,
+    the moment the draft comes back from Gemini. Add new fields to THIS
+    function when the prompt grows, instead of patching a crash later.
+
+    "title" and "html" are the only two fields that can't be sensibly
+    defaulted — without them there's no article at all — so those two
+    still raise if missing, surfacing a clear error instead of publishing
+    an empty post.
+    """
+    if not draft.get("title"):
+        raise RuntimeError("Gemini response is missing required field 'title'.")
+    if not draft.get("html"):
+        raise RuntimeError("Gemini response is missing required field 'html'.")
+
+    def warn(field, fallback_desc):
+        print(f"Gemini response missing/invalid '{field}' — using {fallback_desc}.")
+
+    if not draft.get("pin_hook"):
+        warn("pin_hook", "the title")
+        draft["pin_hook"] = draft["title"]
+
+    if not draft.get("image_prompt"):
+        warn("image_prompt", "the title as the search query")
+        draft["image_prompt"] = draft["title"]
+
+    if not isinstance(draft.get("section_images"), list):
+        warn("section_images", "no section images")
+        draft["section_images"] = []
+    else:
+        # Each item needs at least a usable "query" — drop any that don't,
+        # rather than letting a malformed item crash the image-fetch loop.
+        draft["section_images"] = [
+            s for s in draft["section_images"]
+            if isinstance(s, dict) and s.get("query")
+        ]
+
+    if draft.get("category") not in CATEGORIES:
+        warn("category", "'General Decor'")
+        draft["category"] = "General Decor"
+
+    if not isinstance(draft.get("hashtag_tags"), list):
+        warn("hashtag_tags", "an empty tag list")
+        draft["hashtag_tags"] = []
+    else:
+        draft["hashtag_tags"] = [str(t) for t in draft["hashtag_tags"] if t]
+
+    for field, fallback in [
+        ("total_cost", "See breakdown below"),
+        ("time_estimate", "A weekend"),
+        ("difficulty", "Easy"),
+    ]:
+        value = draft.get(field)
+        if not value or not isinstance(value, (str, int, float)):
+            warn(field, repr(fallback))
+            draft[field] = fallback
+        else:
+            draft[field] = str(value)
+
+    if not isinstance(draft.get("faq"), list):
+        warn("faq", "no FAQ section")
+        draft["faq"] = []
+    else:
+        draft["faq"] = [
+            f for f in draft["faq"]
+            if isinstance(f, dict) and f.get("question") and f.get("answer")
+        ][:3]
+
+    return draft
 
 
 def search_pexels_image(query, orientation="portrait"):
@@ -1364,17 +1446,10 @@ def main():
         print(f"Niche: {niche}")
         print("Asking Gemini for a topic + article...")
         draft = generate_draft(history, niche)
+        draft = normalize_draft(draft)
         print("Topic chosen:", draft["title"])
 
-        # Safety net: if Gemini ever returns a category that isn't one of
-        # the fixed menu categories (typo, missing field, etc.), fall back
-        # to "General Decor" rather than publishing a post the nav menu
-        # can never surface.
-        category = draft.get("category")
-        if category not in CATEGORIES:
-            print(f"Category '{category}' not recognized, falling back to 'General Decor'.")
-            category = "General Decor"
-        draft["category"] = category
+        category = draft["category"]
 
         # Every post gets exactly ONE Blogger label: its category. This keeps
         # the breadcrumb, the thumbnail badge, and the nav menu always in
@@ -1386,21 +1461,18 @@ def main():
         # the category PLUS Gemini's descriptive "hashtag_tags" (e.g. "thrift
         # flip", "diy"), so Pinterest/Instagram hashtag variety doesn't drop
         # just because Blogger's on-site labeling was simplified.
-        hashtag_tags = draft.get("hashtag_tags", []) or []
-        draft["hashtag_labels"] = [category] + [t for t in hashtag_tags if t != category]
+        draft["hashtag_labels"] = [category] + [t for t in draft["hashtag_tags"] if t != category]
         draft["labels"] = [category]
         print("Category:", category)
 
-        # Quick-take fields, computed once here so both the on-page summary
-        # box and the Instagram carousel's info slide can reuse them.
-        # Raw values go into the image slide (PIL just draws plain text);
-        # escaped versions go into the HTML box (avoids breaking the markup
-        # if Gemini's text ever contains &, <, or >).
+        # Quick-take fields — normalize_draft() already guarantees these are
+        # plain, non-empty strings. Raw values go into the image slide (PIL
+        # just draws plain text); escaped versions go into the HTML box.
         plain_word_count = len(re.sub(r"<[^>]+>", " ", draft["html"]).split())
         reading_minutes = max(1, round(plain_word_count / 200))
-        total_cost_raw = str(draft.get("total_cost") or "See breakdown below")
-        time_estimate_raw = str(draft.get("time_estimate") or "A weekend")
-        difficulty_raw = str(draft.get("difficulty") or "Easy")
+        total_cost_raw = draft["total_cost"]
+        time_estimate_raw = draft["time_estimate"]
+        difficulty_raw = draft["difficulty"]
         total_cost = html.escape(total_cost_raw)
         time_estimate = html.escape(time_estimate_raw)
         difficulty = html.escape(difficulty_raw)
@@ -1587,14 +1659,10 @@ def main():
         )
 
         # --- FAQ section + FAQPage schema (for Google rich-result eligibility) ---
-        # Guard with isinstance(f, dict): Gemini occasionally returns an item
-        # in an unexpected shape (e.g. a bare list instead of a
-        # {"question":..., "answer":...} object) — skip those instead of
-        # crashing the whole run over a malformed FAQ item.
-        faq_items = [
-            f for f in draft.get("faq", [])
-            if isinstance(f, dict) and f.get("question") and f.get("answer")
-        ][:3]
+        # normalize_draft() already guarantees this is a clean list of valid
+        # {"question", "answer"} dicts (or an empty list) — no re-validation
+        # needed here.
+        faq_items = draft["faq"]
         faq_html = ""
         faq_schema_html = ""
         if faq_items:
