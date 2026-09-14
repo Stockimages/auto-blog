@@ -549,12 +549,39 @@ def search_pexels_image(query, orientation="portrait"):
     return image_res.content
 
 
-def search_pexels_video(query, orientation="portrait", min_duration=3, max_duration=20):
+
+def compress_image(image_bytes, max_width=1200, quality=78):
+    img = Image.open(BytesIO(image_bytes))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    if img.width > max_width:
+        ratio = max_width / img.width
+        img = img.resize((max_width, int(img.height * ratio)), Image.LANCZOS)
+    out = BytesIO()
+    img.save(out, format="WEBP", quality=quality)
+    return out.getvalue()
+
+
+FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+]
+
+
+def _load_bold_font(size):
+    for path in FONT_CANDIDATES:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+def search_pexels_video(query, orientation="portrait", min_duration=3, max_duration=25):
     """
-    Finds a real Pexels stock video clip matching `query` (generic b-roll,
-    not footage of this specific fictional project — same honesty scope as
-    the stock photos already used elsewhere in this script) and downloads
-    the smallest file that's still at least 720p, to keep runs fast.
+    Finds a real Pexels stock video clip matching `query` — generic
+    topic-matching b-roll (not footage of this specific fictional project,
+    same honesty scope as the stock photos used elsewhere in this script)
+    — and downloads the smallest file that's still at least 720p, to keep
+    runs fast.
     """
     res = robust_request(
         "GET", "https://api.pexels.com/videos/search",
@@ -599,118 +626,109 @@ def search_pexels_video(query, orientation="portrait", min_duration=3, max_durat
     return video_res.content
 
 
-def compress_image(image_bytes, max_width=1200, quality=78):
-    img = Image.open(BytesIO(image_bytes))
-    if img.mode in ("RGBA", "P"):
-        img = img.convert("RGB")
-    if img.width > max_width:
-        ratio = max_width / img.width
-        img = img.resize((max_width, int(img.height * ratio)), Image.LANCZOS)
-    out = BytesIO()
-    img.save(out, format="WEBP", quality=quality)
-    return out.getvalue()
-
-
-FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-]
-
-
-def _load_bold_font(size):
-    for path in FONT_CANDIDATES:
-        if os.path.exists(path):
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
-
-
-def build_hook_overlay_png(text, width=1080):
+def build_caption_overlay_png(text, width=1080, position="top"):
     """
-    Renders the hook text as a transparent PNG with proper word-wrapping
-    and a semi-transparent background bar sized to fit the wrapped text —
-    reuses the same wrapping approach as build_text_card(), so long hooks
-    wrap onto multiple lines instead of overflowing past the frame edges
-    (which is what a raw ffmpeg drawtext string did before this fix).
+    Renders any caption as a transparent PNG with proper word-wrapping and
+    a semi-transparent background bar sized to fit the text — used for the
+    hook line, step captions, and the "before it's a decor piece" tag on
+    process clips. Wrapping (via textwrap, same as build_text_card) is
+    what prevents the text from overflowing past the frame edges, which a
+    raw unwrapped ffmpeg drawtext string used to do.
     """
-    font = _load_bold_font(58)
+    font = _load_bold_font(50 if position == "top" else 44)
     dummy_img = Image.new("RGBA", (width, 10), (0, 0, 0, 0))
     draw = ImageDraw.Draw(dummy_img)
-    wrapped = textwrap.fill(text.upper(), width=22)
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=12, align="center")
+    wrapped = textwrap.fill(text.upper() if position == "top" else text, width=26)
+    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
     text_h = bbox[3] - bbox[1]
 
-    pad_v, pad_h = 30, 40
+    pad_v = 26
     bar_h = text_h + pad_v * 2
     img = Image.new("RGBA", (width, bar_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rectangle([(0, 0), (width, bar_h)], fill=(0, 0, 0, 140))
+    draw.rectangle([(0, 0), (width, bar_h)], fill=(0, 0, 0, 150))
     text_w = bbox[2] - bbox[0]
     x = (width - text_w) / 2 - bbox[0]
     draw.multiline_text((x, pad_v - bbox[1]), wrapped, font=font, fill="white",
-                         align="center", spacing=12)
+                         align="center", spacing=10)
 
     out = BytesIO()
     img.save(out, format="PNG")
     return out.getvalue()
 
 
-def build_reel_video(clip_bytes_list, hook_text, cta_card_bytes, work_dir,
-                      clip_duration=4):
+def build_reel_video(slides, work_dir):
     """
-    Stitches 2-4 raw Pexels stock video clips + a static CTA card into one
-    vertical (1080x1920) MP4 short, with the pin_hook text overlaid (as a
-    pre-wrapped PNG, not raw ffmpeg drawtext — see build_hook_overlay_png)
-    on the first clip. Used for Instagram Reels, Facebook video, and
-    Pinterest video pins — same file, three destinations. Returns the
-    final MP4 bytes. Raises on any ffmpeg failure (caller decides fallback).
+    Builds a vertical (1080x1920) MP4 from a mix of real Pexels video clips
+    (the "process" steps + a final "result" shot — generic topic-matching
+    b-roll, not this specific fictional project's real footage) and static
+    image cards (the CTA card), stitched in order so the video reads as a
+    step-by-step walkthrough: process clips -> result shot -> CTA.
+
+    `slides` is a list of dicts, each either:
+      {"kind": "video", "bytes": <mp4 bytes>, "caption": str or None, "duration": seconds}
+      {"kind": "image", "bytes": <image bytes>, "caption": str or None, "duration": seconds}
+
+    Captions (via build_caption_overlay_png) are pre-wrapped PNGs composited
+    with ffmpeg's overlay filter — not raw drawtext — so long captions wrap
+    onto multiple lines instead of overflowing past the frame edges.
+
+    Used for Instagram Reels, Facebook video, and Pinterest video pins —
+    same file, three destinations. Returns the final MP4 bytes. Raises on
+    any ffmpeg failure (caller decides the fallback).
     """
     os.makedirs(work_dir, exist_ok=True)
     segment_paths = []
+    base_vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30"
 
-    hook_png_path = os.path.join(work_dir, "hook_overlay.png")
-    with open(hook_png_path, "wb") as f:
-        f.write(build_hook_overlay_png(hook_text))
+    for i, slide in enumerate(slides):
+        seg_path = os.path.join(work_dir, f"seg_{i}.mp4")
+        caption_png_path = None
+        if slide.get("caption"):
+            caption_png_path = os.path.join(work_dir, f"caption_{i}.png")
+            with open(caption_png_path, "wb") as f:
+                f.write(build_caption_overlay_png(slide["caption"]))
 
-    for i, clip_bytes in enumerate(clip_bytes_list):
-        raw_path = os.path.join(work_dir, f"raw_{i}.mp4")
-        with open(raw_path, "wb") as f:
-            f.write(clip_bytes)
-
-        trimmed_path = os.path.join(work_dir, f"seg_{i}.mp4")
-        base_vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30"
-        if i == 0:
-            # Composite the pre-wrapped hook PNG onto the scaled/cropped
-            # clip via overlay — this is what fixes the text getting cut
-            # off at the frame edges (drawtext had no word-wrap).
-            cmd = [
-                "ffmpeg", "-y", "-i", raw_path, "-i", hook_png_path,
-                "-t", str(clip_duration),
-                "-filter_complex",
-                f"[0:v]{base_vf}[bg];[bg][1:v]overlay=0:H*0.08[out]",
-                "-map", "[out]", "-an",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23", trimmed_path,
-            ]
-        else:
-            cmd = [
-                "ffmpeg", "-y", "-i", raw_path, "-t", str(clip_duration),
-                "-vf", base_vf, "-an",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23", trimmed_path,
-            ]
+        if slide["kind"] == "video":
+            raw_path = os.path.join(work_dir, f"raw_{i}.mp4")
+            with open(raw_path, "wb") as f:
+                f.write(slide["bytes"])
+            if caption_png_path:
+                cmd = [
+                    "ffmpeg", "-y", "-i", raw_path, "-i", caption_png_path,
+                    "-t", str(slide["duration"]),
+                    "-filter_complex",
+                    f"[0:v]{base_vf}[bg];[bg][1:v]overlay=0:H*0.08[out]",
+                    "-map", "[out]", "-an",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
+                ]
+            else:
+                cmd = [
+                    "ffmpeg", "-y", "-i", raw_path, "-t", str(slide["duration"]),
+                    "-vf", base_vf, "-an",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
+                ]
+        else:  # static image card (e.g. the CTA card)
+            img_path = os.path.join(work_dir, f"img_{i}.png")
+            with open(img_path, "wb") as f:
+                f.write(slide["bytes"])
+            if caption_png_path:
+                cmd = [
+                    "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+                    "-i", caption_png_path, "-t", str(slide["duration"]),
+                    "-filter_complex",
+                    f"[0:v]scale=1080:1920[bg];[bg][1:v]overlay=0:H*0.08[out]",
+                    "-map", "[out]", "-an",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
+                ]
+            else:
+                cmd = [
+                    "ffmpeg", "-y", "-loop", "1", "-i", img_path, "-t", str(slide["duration"]),
+                    "-vf", "scale=1080:1920,fps=30", "-an",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
+                ]
         subprocess.run(cmd, check=True, capture_output=True)
-        segment_paths.append(trimmed_path)
-
-    # CTA end-card: turn the static "link in bio" card into a video clip.
-    cta_img_path = os.path.join(work_dir, "cta.png")
-    with open(cta_img_path, "wb") as f:
-        f.write(cta_card_bytes)
-    cta_video_path = os.path.join(work_dir, "seg_cta.mp4")
-    subprocess.run(
-        ["ffmpeg", "-y", "-loop", "1", "-i", cta_img_path, "-t", "3",
-         "-vf", "scale=1080:1920,fps=30", "-an",
-         "-c:v", "libx264", "-preset", "fast", "-crf", "23", cta_video_path],
-        check=True, capture_output=True,
-    )
-    segment_paths.append(cta_video_path)
+        segment_paths.append(seg_path)
 
     # Concatenate all segments, and add a silent audio track — Instagram
     # Reels / Facebook expect an audio stream present even if it's silent.
@@ -1543,8 +1561,23 @@ def main():
         committed_paths.append(ig_filepath)
         print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
 
+        # --- Quick-take card (used two ways): a carousel slide in
+        # image-mode, or one of the slideshow slides in video-mode. Built
+        # once either way — no extra Pexels call, just drawn text.
+        ig_quicktake_compressed = build_text_card([
+            ("Quick Take", True),
+            (f"Cost: {total_cost_raw}", False),
+            (f"Time: {time_estimate_raw}", False),
+            (f"Difficulty: {difficulty_raw}", False),
+        ])
+        ig_slide2_filename = f"decor-{ts}-ig-quicktake.webp"
+        ig_slide2_filepath = os.path.join("images", ig_slide2_filename)
+        with open(ig_slide2_filepath, "wb") as f:
+            f.write(ig_quicktake_compressed)
+        committed_paths.append(ig_slide2_filepath)
+
         # --- CTA card (used two ways): last slide of the image-mode
-        # carousel, OR the closing segment of the video-mode Reel/video.
+        # carousel, OR the closing slide of the video-mode slideshow.
         # Built once either way — no extra Pexels call, just drawn text.
         ig_cta_compressed = build_text_card([
             ("Want The Full Guide", True),
@@ -1557,67 +1590,9 @@ def main():
             f.write(ig_cta_compressed)
         committed_paths.append(ig_slide4_filepath)
 
-        reel_video_filepath = None
-        if RUN_TYPE == "video":
-            # --- Video-mode: fetch 3 real Pexels stock clips (generic
-            # topic-matching b-roll, same honesty scope as the stock photos
-            # used everywhere else in this script) and stitch them + the
-            # CTA card into one vertical Reel/video via ffmpeg. 3 clips (was
-            # 2) for more visual variety — a 2-clip video felt too sparse.
-            print("Video-mode run: fetching Pexels stock video clips...")
-            clip_queries = [draft["image_prompt"]] + [
-                s.get("query", draft["image_prompt"]) for s in draft.get("section_images", [])
-            ][:2]
-            clip_bytes_list = []
-            for q in clip_queries[:3]:
-                try:
-                    clip_bytes_list.append(search_pexels_video(q))
-                except Exception as e:
-                    print(f"Pexels video search failed for '{q}': {e}")
-            if not clip_bytes_list:
-                # Last-resort generic query, so a run never fails purely
-                # because one specific search came back empty.
-                clip_bytes_list.append(search_pexels_video("home decor"))
-
-            print(f"Building Reel/video from {len(clip_bytes_list)} clip(s)...")
-            reel_video_bytes = build_reel_video(
-                clip_bytes_list, pin_hook, ig_cta_compressed,
-                work_dir=os.path.join("images", f"reel-work-{ts}"),
-            )
-            reel_video_filename = f"decor-{ts}-reel.mp4"
-            reel_video_filepath = os.path.join("images", reel_video_filename)
-            with open(reel_video_filepath, "wb") as f:
-                f.write(reel_video_bytes)
-            committed_paths.append(reel_video_filepath)
-            print(f"Reel/video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
-
-            # Pinterest's video-pin cover_image_url rejects WebP (every
-            # other image in this script is WebP) — it needs JPG/PNG. Build
-            # a one-off JPEG copy of the hero image just for this.
-            pin_cover_img = Image.open(BytesIO(raw_hero)).convert("RGB")
-            pin_cover_out = BytesIO()
-            pin_cover_img.save(pin_cover_out, format="JPEG", quality=85)
-            pin_cover_filename = f"decor-{ts}-pin-cover.jpg"
-            pin_cover_filepath = os.path.join("images", pin_cover_filename)
-            with open(pin_cover_filepath, "wb") as f:
-                f.write(pin_cover_out.getvalue())
-            committed_paths.append(pin_cover_filepath)
-        else:
-            # --- Image-mode (default/morning run): the usual 2 extra
-            # carousel slides (quick-take card + second hook photo).
-            print("Preparing Instagram carousel slides (quick-take + CTA cards)...")
-            ig_slide2_compressed = build_text_card([
-                ("Quick Take", True),
-                (f"Cost: {total_cost_raw}", False),
-                (f"Time: {time_estimate_raw}", False),
-                (f"Difficulty: {difficulty_raw}", False),
-            ])
-            ig_slide2_filename = f"decor-{ts}-ig-quicktake.webp"
-            ig_slide2_filepath = os.path.join("images", ig_slide2_filename)
-            with open(ig_slide2_filepath, "wb") as f:
-                f.write(ig_slide2_compressed)
-            committed_paths.append(ig_slide2_filepath)
-
+        if RUN_TYPE != "video":
+            # --- Image-mode (default/morning run): the 3rd carousel slide
+            # (a second hook photo, reusing raw_hero — no extra Pexels call).
             ig_slide3_compressed = finalize_pin_image(
                 raw_hero, "See The Full Tutorial", target_ratio=4 / 5
             )
@@ -1662,6 +1637,72 @@ def main():
                 f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{section_filepath}",
                 query,
             )
+
+        reel_video_filepath = None
+        pin_cover_filepath = None
+        if RUN_TYPE == "video":
+            # --- Video-mode: build a real video that follows the article —
+            # one process clip per section (same queries used for the
+            # article's own section photos, so the footage matches what's
+            # actually written about), then a final "result" clip using the
+            # hero's own query (the finished-look shot), then the CTA card.
+            # Clips are generic topic-matching stock b-roll — same honesty
+            # scope as the stock photos used everywhere else in this script
+            # — not real footage of this specific fictional project.
+            print("Video-mode run: fetching Pexels process + result video clips...")
+            process_queries = [q for _, q in section_urls.values()] or [draft["image_prompt"]]
+
+            slides = []
+            for q in process_queries:
+                try:
+                    clip_bytes = search_pexels_video(q)
+                    slides.append({"kind": "video", "bytes": clip_bytes, "caption": q.title(), "duration": 4})
+                except Exception as e:
+                    print(f"Pexels video search failed for '{q}': {e}")
+
+            # The opening clip carries the curiosity hook instead of a plain
+            # step caption — same hook line used everywhere else.
+            if slides:
+                slides[0]["caption"] = pin_hook
+
+            try:
+                result_bytes = search_pexels_video(draft["image_prompt"])
+                slides.append({"kind": "video", "bytes": result_bytes, "caption": "The Result", "duration": 4})
+            except Exception as e:
+                print(f"Pexels result-clip search failed: {e}")
+
+            if not slides:
+                # Last resort so a run never fails purely because every
+                # specific search came back empty.
+                slides.append({
+                    "kind": "video", "bytes": search_pexels_video("home decor"),
+                    "caption": pin_hook, "duration": 4,
+                })
+
+            slides.append({"kind": "image", "bytes": ig_cta_compressed, "caption": None, "duration": 3})
+
+            print(f"Building video from {len(slides)} slide(s)...")
+            reel_video_bytes = build_reel_video(
+                slides, work_dir=os.path.join("images", f"reel-work-{ts}")
+            )
+            reel_video_filename = f"decor-{ts}-reel.mp4"
+            reel_video_filepath = os.path.join("images", reel_video_filename)
+            with open(reel_video_filepath, "wb") as f:
+                f.write(reel_video_bytes)
+            committed_paths.append(reel_video_filepath)
+            print(f"Video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
+
+            # Pinterest's video-pin cover_image_url rejects WebP (every
+            # other image in this script is WebP) — it needs JPG/PNG. Build
+            # a one-off JPEG copy of the hero image just for this.
+            pin_cover_img = Image.open(BytesIO(raw_hero)).convert("RGB")
+            pin_cover_out = BytesIO()
+            pin_cover_img.save(pin_cover_out, format="JPEG", quality=85)
+            pin_cover_filename = f"decor-{ts}-pin-cover.jpg"
+            pin_cover_filepath = os.path.join("images", pin_cover_filename)
+            with open(pin_cover_filepath, "wb") as f:
+                f.write(pin_cover_out.getvalue())
+            committed_paths.append(pin_cover_filepath)
 
         print("Committing images to the repo...")
         git_commit_and_push(committed_paths, f"Auto post images: {draft['title']}")
