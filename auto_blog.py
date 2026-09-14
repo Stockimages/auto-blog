@@ -624,45 +624,82 @@ def _load_bold_font(size):
     return ImageFont.load_default()
 
 
-def build_reel_video(clip_bytes_list, hook_text, cta_card_bytes, work_dir):
+def build_hook_overlay_png(text, width=1080):
     """
-    Stitches 2-3 raw Pexels stock video clips + a static CTA card into one
-    vertical (1080x1920) MP4 short, with the pin_hook text burned onto the
-    first clip. Used for Instagram Reels, Facebook video, and Pinterest
-    video pins — same file, three destinations. Returns the final MP4
-    bytes. Raises on any ffmpeg failure (caller decides the fallback).
+    Renders the hook text as a transparent PNG with proper word-wrapping
+    and a semi-transparent background bar sized to fit the wrapped text —
+    reuses the same wrapping approach as build_text_card(), so long hooks
+    wrap onto multiple lines instead of overflowing past the frame edges
+    (which is what a raw ffmpeg drawtext string did before this fix).
+    """
+    font = _load_bold_font(58)
+    dummy_img = Image.new("RGBA", (width, 10), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(dummy_img)
+    wrapped = textwrap.fill(text.upper(), width=22)
+    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=12, align="center")
+    text_h = bbox[3] - bbox[1]
+
+    pad_v, pad_h = 30, 40
+    bar_h = text_h + pad_v * 2
+    img = Image.new("RGBA", (width, bar_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([(0, 0), (width, bar_h)], fill=(0, 0, 0, 140))
+    text_w = bbox[2] - bbox[0]
+    x = (width - text_w) / 2 - bbox[0]
+    draw.multiline_text((x, pad_v - bbox[1]), wrapped, font=font, fill="white",
+                         align="center", spacing=12)
+
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+def build_reel_video(clip_bytes_list, hook_text, cta_card_bytes, work_dir,
+                      clip_duration=4):
+    """
+    Stitches 2-4 raw Pexels stock video clips + a static CTA card into one
+    vertical (1080x1920) MP4 short, with the pin_hook text overlaid (as a
+    pre-wrapped PNG, not raw ffmpeg drawtext — see build_hook_overlay_png)
+    on the first clip. Used for Instagram Reels, Facebook video, and
+    Pinterest video pins — same file, three destinations. Returns the
+    final MP4 bytes. Raises on any ffmpeg failure (caller decides fallback).
     """
     os.makedirs(work_dir, exist_ok=True)
     segment_paths = []
-    font_path = next((p for p in FONT_CANDIDATES if os.path.exists(p)), None)
+
+    hook_png_path = os.path.join(work_dir, "hook_overlay.png")
+    with open(hook_png_path, "wb") as f:
+        f.write(build_hook_overlay_png(hook_text))
 
     for i, clip_bytes in enumerate(clip_bytes_list):
         raw_path = os.path.join(work_dir, f"raw_{i}.mp4")
         with open(raw_path, "wb") as f:
             f.write(clip_bytes)
 
-        vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30"
-        if i == 0 and font_path:
-            # Burn the same curiosity hook used on the image posts onto the
-            # opening clip, so the video carries the same "why click" line.
-            escaped_text = (
-                hook_text.upper().replace("\\", "").replace("'", "").replace(":", "\\:")
-            )
-            vf += (
-                f",drawtext=fontfile={font_path}:text='{escaped_text}':"
-                "fontcolor=white:fontsize=58:box=1:boxcolor=black@0.55:boxborderw=20:"
-                "x=(w-text_w)/2:y=h*0.08"
-            )
-
         trimmed_path = os.path.join(work_dir, f"seg_{i}.mp4")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", raw_path, "-t", "3", "-vf", vf, "-an",
-             "-c:v", "libx264", "-preset", "fast", "-crf", "23", trimmed_path],
-            check=True, capture_output=True,
-        )
+        base_vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30"
+        if i == 0:
+            # Composite the pre-wrapped hook PNG onto the scaled/cropped
+            # clip via overlay — this is what fixes the text getting cut
+            # off at the frame edges (drawtext had no word-wrap).
+            cmd = [
+                "ffmpeg", "-y", "-i", raw_path, "-i", hook_png_path,
+                "-t", str(clip_duration),
+                "-filter_complex",
+                f"[0:v]{base_vf}[bg];[bg][1:v]overlay=0:H*0.08[out]",
+                "-map", "[out]", "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23", trimmed_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-i", raw_path, "-t", str(clip_duration),
+                "-vf", base_vf, "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23", trimmed_path,
+            ]
+        subprocess.run(cmd, check=True, capture_output=True)
         segment_paths.append(trimmed_path)
 
-    # CTA end-card: turn the static "link in bio" card into a 3s video clip.
+    # CTA end-card: turn the static "link in bio" card into a video clip.
     cta_img_path = os.path.join(work_dir, "cta.png")
     with open(cta_img_path, "wb") as f:
         f.write(cta_card_bytes)
@@ -1522,16 +1559,17 @@ def main():
 
         reel_video_filepath = None
         if RUN_TYPE == "video":
-            # --- Video-mode: fetch 2 real Pexels stock clips (generic
+            # --- Video-mode: fetch 3 real Pexels stock clips (generic
             # topic-matching b-roll, same honesty scope as the stock photos
             # used everywhere else in this script) and stitch them + the
-            # CTA card into one vertical Reel/video via ffmpeg.
+            # CTA card into one vertical Reel/video via ffmpeg. 3 clips (was
+            # 2) for more visual variety — a 2-clip video felt too sparse.
             print("Video-mode run: fetching Pexels stock video clips...")
             clip_queries = [draft["image_prompt"]] + [
                 s.get("query", draft["image_prompt"]) for s in draft.get("section_images", [])
-            ][:1]
+            ][:2]
             clip_bytes_list = []
-            for q in clip_queries[:2]:
+            for q in clip_queries[:3]:
                 try:
                     clip_bytes_list.append(search_pexels_video(q))
                 except Exception as e:
@@ -1552,6 +1590,18 @@ def main():
                 f.write(reel_video_bytes)
             committed_paths.append(reel_video_filepath)
             print(f"Reel/video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
+
+            # Pinterest's video-pin cover_image_url rejects WebP (every
+            # other image in this script is WebP) — it needs JPG/PNG. Build
+            # a one-off JPEG copy of the hero image just for this.
+            pin_cover_img = Image.open(BytesIO(raw_hero)).convert("RGB")
+            pin_cover_out = BytesIO()
+            pin_cover_img.save(pin_cover_out, format="JPEG", quality=85)
+            pin_cover_filename = f"decor-{ts}-pin-cover.jpg"
+            pin_cover_filepath = os.path.join("images", pin_cover_filename)
+            with open(pin_cover_filepath, "wb") as f:
+                f.write(pin_cover_out.getvalue())
+            committed_paths.append(pin_cover_filepath)
         else:
             # --- Image-mode (default/morning run): the usual 2 extra
             # carousel slides (quick-take card + second hook photo).
@@ -1621,6 +1671,7 @@ def main():
         ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
         if RUN_TYPE == "video":
             reel_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{reel_video_filepath}"
+            pin_cover_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{pin_cover_filepath}"
         else:
             ig_slide2_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide2_filepath}"
             ig_slide3_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide3_filepath}"
@@ -1829,7 +1880,7 @@ def main():
                 description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
                 link=post_url,
                 video_bytes=reel_video_bytes_for_pin,
-                cover_image_url=hero_url,
+                cover_image_url=pin_cover_url,
             )
         else:
             pin_result = create_pinterest_pin(
