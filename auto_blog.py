@@ -224,7 +224,12 @@ def save_history(history):
 
 
 def generate_draft(history, niche):
-    recent_titles = [h["title"] for h in history[-50:]]
+    # Duplicate-topic avoidance window: at ~2 posts/day, checking only the
+    # last 50 titles covers ~25 days — past that, older topics could start
+    # silently repeating since Gemini never sees them again. 300 covers
+    # ~5 months before the same widening concern reappears; titles are
+    # short so this stays cheap even at that size.
+    recent_titles = [h["title"] for h in history[-300:]]
 
     # Only entries that have a URL (i.e. posts we've actually published since
     # URL-tracking was added) are usable as internal-link candidates.
@@ -1827,6 +1832,25 @@ def main():
             "affordably.</div>"
         )
 
+        # --- Article/BlogPosting schema (JSON-LD) — separate from the FAQ
+        # schema above, this is what lets Google show a thumbnail image and
+        # published date alongside the search result for the post itself.
+        published_iso = datetime.now(timezone.utc).isoformat()
+        article_schema = {
+            "@context": "https://schema.org",
+            "@type": "BlogPosting",
+            "headline": draft["title"],
+            "image": [hero_url],
+            "datePublished": published_iso,
+            "dateModified": published_iso,
+            "author": {"@type": "Organization", "name": "DecorVibe"},
+            "publisher": {"@type": "Organization", "name": "DecorVibe"},
+        }
+        article_schema_html = (
+            '<script type="application/ld+json">'
+            f"{json.dumps(article_schema, ensure_ascii=False)}</script>"
+        )
+
         # Hidden square image placed FIRST so it becomes the page's og:image
         # (Blogger uses the first <img> in the post body for that) — this is
         # what Facebook's link-share card shows. display:none keeps it
@@ -1836,7 +1860,7 @@ def main():
             hidden_og_img +
             f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n'
             f'{quick_take_html}\n{body_html}\n{related_posts_html}\n{faq_html}\n'
-            f'{author_bio_html}\n{faq_schema_html}'
+            f'{author_bio_html}\n{faq_schema_html}\n{article_schema_html}'
         )
         social_description = extract_pin_description(draft["html"])
 
