@@ -117,6 +117,22 @@ CATEGORIES = [
     "General Decor",
 ]
 
+# Each category pins to its own dedicated Pinterest board (created manually
+# in the Pinterest UI, IDs copied from get_pinterest_boards.py) instead of
+# everything going to one shared board — better topical discovery on
+# Pinterest. PINTEREST_BOARD_ID (the original single board) stays as the
+# fallback for any category that's missing here.
+CATEGORY_BOARD_IDS = {
+    "Living Room": "1123014925773074351",
+    "Bedroom": "1123014925773074361",
+    "Kitchen": "1123014925773074364",
+    "Bathroom": "1123014925773074365",
+    "Small Spaces": "1123014925773074366",
+    "Entryway": "1123014925773074367",
+    "Outdoor": "1123014925773074371",
+    "General Decor": "1123014925773074374",
+}
+
 # Words/phrases that make AI writing sound canned. Gemini is told to avoid these.
 BANNED_PHRASES = [
     "elevate", "delve", "unlock", "unleash", "seamless", "seamlessly",
@@ -1385,15 +1401,16 @@ def main():
     pinterest_ok = False
     try:
         pinterest_token = get_pinterest_access_token()
+        board_id = CATEGORY_BOARD_IDS.get(category, PINTEREST_BOARD_ID)
         pin_result = create_pinterest_pin(
             pinterest_token,
-            board_id=PINTEREST_BOARD_ID,
+            board_id=board_id,
             title=draft["title"],
             description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
             link=post_url,
             image_url=hero_url,
         )
-        print("Pinned:", pin_result.get("id"))
+        print("Pinned:", pin_result.get("id"), "-> board:", board_id)
         pinterest_ok = True
     except Exception as e:
         print(f"Pinterest post failed (blog post is still published fine): {e}")
