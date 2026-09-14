@@ -284,11 +284,25 @@ quotes are the JSON string delimiter and will break the response.
 6. QUICK FACTS: also provide total_cost (the final total from your budget
    table, e.g. "$26"), time_estimate (e.g. "1 hour", "A weekend"), and
    difficulty ("Easy", "Moderate", or "Advanced") — used for a quick-take
-   summary box at the top of the post.
+   summary box at the top of the post. All three MUST be plain strings
+   (e.g. "$26", not 26; not a list).
 
 7. FAQ: write exactly 3 short, genuinely specific reader questions about
    THIS project (not generic decor questions) with concise 1-2 sentence
    answers. No quotation marks inside the question/answer text.
+
+   STRICT FORMAT — "faq" MUST be a list of exactly 3 JSON objects, each with
+   a "question" key and an "answer" key, both plain strings. Do NOT return
+   plain strings, arrays of two strings, or any other shape. Example of the
+   ONLY acceptable shape (using this article's own type of topic):
+   "faq": [
+     {{"question": "Will this work on a stand that already has some rust",
+       "answer": "Yes, light surface rust is fine — scrub it off with steel wool before priming so the paint has a clean surface to grip."}},
+     {{"question": "Do I need to remove the wire mesh before painting",
+       "answer": "No, leave it in place — it gives the spray paint something to grip and keeps the stand's original shape intact."}},
+     {{"question": "How long before the finish can handle daily use",
+       "answer": "Let it cure a full 48 hours before placing anything in it, even though it feels dry to the touch after a few hours."}}
+   ]
 
 Also write:
 - "pin_hook": a punchy, benefit- or curiosity-driven phrase, 5-8 words max,
@@ -1074,9 +1088,9 @@ def main():
         # if Gemini's text ever contains &, <, or >).
         plain_word_count = len(re.sub(r"<[^>]+>", " ", draft["html"]).split())
         reading_minutes = max(1, round(plain_word_count / 200))
-        total_cost_raw = draft.get("total_cost", "See breakdown below")
-        time_estimate_raw = draft.get("time_estimate", "A weekend")
-        difficulty_raw = draft.get("difficulty", "Easy")
+        total_cost_raw = str(draft.get("total_cost") or "See breakdown below")
+        time_estimate_raw = str(draft.get("time_estimate") or "A weekend")
+        difficulty_raw = str(draft.get("difficulty") or "Easy")
         total_cost = html.escape(total_cost_raw)
         time_estimate = html.escape(time_estimate_raw)
         difficulty = html.escape(difficulty_raw)
@@ -1196,21 +1210,22 @@ def main():
         fb_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{fb_filepath}"
 
 
-        # Swap [[IMG_n]] placeholders for section images. These are rendered
-        # as a div with a CSS background-image (not a real <img> tag) on
-        # purpose: Pinterest's RSS auto-publish creates a Pin for every
-        # <img src="..."> it finds in the post body, which was turning each
-        # article into 4 pins (hero + 3 sections) of mismatched sizes.
-        # Background-image divs display identically but aren't picked up by
-        # that scraper, so only the intentional hero <img> gets pinned.
+        # Section images are real <img> tags with proper alt text — this
+        # used to be a CSS background-image div instead, specifically to
+        # dodge Pinterest's RSS auto-publish scraper (which pinned every
+        # <img> it found in the post body). That RSS feature has since been
+        # fully deleted, so the workaround is no longer needed, and a real
+        # <img alt="..."> is what actually gets section photos indexed in
+        # Google Images (a CSS background-image on a div is invisible to
+        # Google's image search).
         body_html = draft["html"]
         for token, (url, query) in section_urls.items():
+            alt_text = html.escape(query)
             img_tag = (
-                f'<div role="img" aria-label="{query}" '
+                f'<img src="{url}" alt="{alt_text}" loading="lazy" '
                 f'style="width:100%;max-width:100%;aspect-ratio:4/3;'
-                f'background-image:url(\'{url}\');background-size:cover;'
-                f'background-position:center;border-radius:10px;'
-                f'box-shadow:0 2px 10px rgba(0,0,0,0.12);margin:20px 0;"></div>'
+                f'object-fit:cover;border-radius:10px;'
+                f'box-shadow:0 2px 10px rgba(0,0,0,0.12);margin:20px 0;" />'
             )
             body_html = re.sub(rf"\[\[{re.escape(token)}\]\]", img_tag, body_html)
         # Remove any leftover placeholders Gemini added without a matching section_images entry.
@@ -1226,17 +1241,21 @@ def main():
         )
 
         # --- FAQ section + FAQPage schema (for Google rich-result eligibility) ---
+        # Guard with isinstance(f, dict): Gemini occasionally returns an item
+        # in an unexpected shape (e.g. a bare list instead of a
+        # {"question":..., "answer":...} object) — skip those instead of
+        # crashing the whole run over a malformed FAQ item.
         faq_items = [
             f for f in draft.get("faq", [])
-            if f.get("question") and f.get("answer")
+            if isinstance(f, dict) and f.get("question") and f.get("answer")
         ][:3]
         faq_html = ""
         faq_schema_html = ""
         if faq_items:
             faq_parts = ["<h2>Frequently Asked Questions</h2>"]
             for item in faq_items:
-                q = html.escape(item["question"])
-                a = html.escape(item["answer"])
+                q = html.escape(str(item["question"]))
+                a = html.escape(str(item["answer"]))
                 faq_parts.append(f"<h3>{q}</h3><p>{a}</p>")
             faq_html = "\n".join(faq_parts)
 
@@ -1257,16 +1276,28 @@ def main():
                 f"{json.dumps(faq_schema, ensure_ascii=False)}</script>"
             )
 
-        # --- Related posts (same category, most recent, excluding this one) ---
-        related = [
+        # --- Related posts (same category first, then fill remaining slots
+        # with the most recent posts overall so this section is never empty
+        # just because a category is new/thin). Still fully static (baked
+        # into the HTML at publish time) — no extra JS/network request on
+        # page load, so there's no page-speed trade-off.
+        same_category = [
             h for h in history
             if h.get("category") == category and h.get("url")
-        ][-3:]
+        ]
+        related = list(reversed(same_category[-3:]))
+        if len(related) < 3:
+            related_urls = {h["url"] for h in related}
+            most_recent = [
+                h for h in reversed(history)
+                if h.get("url") and h["url"] not in related_urls
+            ]
+            related = related + most_recent[: 3 - len(related)]
         related_posts_html = ""
         if related:
             items = "".join(
                 f'<li><a href="{h["url"]}">{html.escape(h["title"])}</a></li>'
-                for h in reversed(related)
+                for h in related
             )
             related_posts_html = f"<h2>You Might Also Like</h2><ul>{items}</ul>"
 
