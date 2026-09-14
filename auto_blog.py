@@ -86,6 +86,13 @@ INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
 # Auto-set by GitHub Actions as "owner/repo". Falls back for local testing.
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo")
 
+# Controls which social-posting mode this run uses. Set via the GitHub
+# Actions workflow so the 6:30 AM trigger passes RUN_TYPE=image (current
+# carousel/link/image-pin behavior) and the 6:30 PM trigger passes
+# RUN_TYPE=video (Reel/native-video/video-pin behavior). Defaults to
+# "image" so nothing changes if the workflow doesn't set it.
+RUN_TYPE = os.environ.get("RUN_TYPE", "image").strip().lower()
+
 # Model name — Google updates these periodically. If a run starts failing
 # with a 404 "model not found" error, check the current name in Google AI
 # Studio and update below (or set GEMINI_TEXT_MODEL as an env var/config value).
@@ -337,7 +344,7 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "title": "a specific, honest, clickable title",
   "category": "EXACTLY one of the fixed categories listed above",
   "pin_hook": "...",
-  "hashtag_tags": ["3-5 short descriptive style/content tags for social hashtags only, e.g. thrift flip, diy, budget decor — these do NOT affect the site's category"],
+  "hashtag_tags": ["8-12 short descriptive style/content tags for social hashtags only (Instagram/Facebook use more of these than Pinterest does), e.g. thrift flip, diy, budget decor, home makeover, thrifted finds — these do NOT affect the site's category"],
   "total_cost": "e.g. $26",
   "time_estimate": "e.g. 1 hour",
   "difficulty": "Easy, Moderate, or Advanced",
@@ -460,6 +467,56 @@ def search_pexels_image(query, orientation="portrait"):
     return image_res.content
 
 
+def search_pexels_video(query, orientation="portrait", min_duration=3, max_duration=20):
+    """
+    Finds a real Pexels stock video clip matching `query` (generic b-roll,
+    not footage of this specific fictional project — same honesty scope as
+    the stock photos already used elsewhere in this script) and downloads
+    the smallest file that's still at least 720p, to keep runs fast.
+    """
+    res = robust_request(
+        "GET", "https://api.pexels.com/videos/search",
+        headers={"Authorization": PEXELS_API_KEY},
+        params={"query": query, "orientation": orientation, "per_page": 15},
+        timeout=30,
+    )
+    if not res.ok:
+        raise RuntimeError(f"Pexels video search failed ({res.status_code}): {res.text}")
+
+    videos = [
+        v for v in res.json().get("videos", [])
+        if min_duration <= v.get("duration", 0) <= max_duration
+    ]
+    if not videos:
+        res = robust_request(
+            "GET", "https://api.pexels.com/videos/search",
+            headers={"Authorization": PEXELS_API_KEY},
+            params={"query": "home decor", "orientation": orientation, "per_page": 15},
+            timeout=30,
+        )
+        if not res.ok:
+            raise RuntimeError(f"Pexels video fallback search failed ({res.status_code}): {res.text}")
+        videos = [
+            v for v in res.json().get("videos", [])
+            if min_duration <= v.get("duration", 0) <= max_duration
+        ]
+        if not videos:
+            raise RuntimeError(f"No suitable Pexels videos found for query: {query}")
+
+    video = random.choice(videos)
+    # Pick the smallest file that's still HD (720p+), to keep downloads and
+    # ffmpeg processing fast — we re-encode everything anyway, so starting
+    # resolution beyond 1080p is wasted bandwidth.
+    hd_files = [f for f in video["video_files"] if (f.get("height") or 0) >= 720]
+    candidates = sorted(hd_files or video["video_files"], key=lambda f: f.get("width", 0))
+    file_info = candidates[0]
+
+    video_res = robust_request("GET", file_info["link"], timeout=60)
+    if not video_res.ok:
+        raise RuntimeError(f"Pexels video download failed ({video_res.status_code})")
+    return video_res.content
+
+
 def compress_image(image_bytes, max_width=1200, quality=78):
     img = Image.open(BytesIO(image_bytes))
     if img.mode in ("RGBA", "P"):
@@ -483,6 +540,80 @@ def _load_bold_font(size):
         if os.path.exists(path):
             return ImageFont.truetype(path, size)
     return ImageFont.load_default()
+
+
+def build_reel_video(clip_bytes_list, hook_text, cta_card_bytes, work_dir):
+    """
+    Stitches 2-3 raw Pexels stock video clips + a static CTA card into one
+    vertical (1080x1920) MP4 short, with the pin_hook text burned onto the
+    first clip. Used for Instagram Reels, Facebook video, and Pinterest
+    video pins — same file, three destinations. Returns the final MP4
+    bytes. Raises on any ffmpeg failure (caller decides the fallback).
+    """
+    os.makedirs(work_dir, exist_ok=True)
+    segment_paths = []
+    font_path = next((p for p in FONT_CANDIDATES if os.path.exists(p)), None)
+
+    for i, clip_bytes in enumerate(clip_bytes_list):
+        raw_path = os.path.join(work_dir, f"raw_{i}.mp4")
+        with open(raw_path, "wb") as f:
+            f.write(clip_bytes)
+
+        vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30"
+        if i == 0 and font_path:
+            # Burn the same curiosity hook used on the image posts onto the
+            # opening clip, so the video carries the same "why click" line.
+            escaped_text = (
+                hook_text.upper().replace("\\", "").replace("'", "").replace(":", "\\:")
+            )
+            vf += (
+                f",drawtext=fontfile={font_path}:text='{escaped_text}':"
+                "fontcolor=white:fontsize=58:box=1:boxcolor=black@0.55:boxborderw=20:"
+                "x=(w-text_w)/2:y=h*0.08"
+            )
+
+        trimmed_path = os.path.join(work_dir, f"seg_{i}.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_path, "-t", "3", "-vf", vf, "-an",
+             "-c:v", "libx264", "-preset", "fast", "-crf", "23", trimmed_path],
+            check=True, capture_output=True,
+        )
+        segment_paths.append(trimmed_path)
+
+    # CTA end-card: turn the static "link in bio" card into a 3s video clip.
+    cta_img_path = os.path.join(work_dir, "cta.png")
+    with open(cta_img_path, "wb") as f:
+        f.write(cta_card_bytes)
+    cta_video_path = os.path.join(work_dir, "seg_cta.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-loop", "1", "-i", cta_img_path, "-t", "3",
+         "-vf", "scale=1080:1920,fps=30", "-an",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "23", cta_video_path],
+        check=True, capture_output=True,
+    )
+    segment_paths.append(cta_video_path)
+
+    # Concatenate all segments, and add a silent audio track — Instagram
+    # Reels / Facebook expect an audio stream present even if it's silent.
+    concat_list_path = os.path.join(work_dir, "concat.txt")
+    with open(concat_list_path, "w") as f:
+        for p in segment_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+
+    final_path = os.path.join(work_dir, "final.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y",
+         "-f", "concat", "-safe", "0", "-i", concat_list_path,
+         "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+         "-shortest",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+         final_path],
+        check=True, capture_output=True,
+    )
+
+    with open(final_path, "rb") as f:
+        return f.read()
 
 
 def crop_to_ratio(img, target_ratio=2 / 3):
@@ -793,6 +924,74 @@ def create_pinterest_pin(access_token, board_id, title, description, link, image
     return res.json()
 
 
+def create_pinterest_video_pin(access_token, board_id, title, description, link,
+                                video_bytes, cover_image_url):
+    """
+    Creates a Pinterest VIDEO pin (used only for RUN_TYPE=video runs).
+    Unlike the image pin (which just points at a URL), Pinterest's video
+    pins require directly uploading the file bytes in three steps:
+      1. Register an upload -> get a media_id + presigned upload_url/fields
+      2. POST the video bytes to that presigned URL
+      3. Poll the media_id until Pinterest finishes processing it
+    Then the pin itself references that media_id. Raises on failure — the
+    caller wraps this in try/except like the image pin call already is.
+    """
+    register_res = robust_request(
+        "POST", "https://api.pinterest.com/v5/media",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"media_type": "video"},
+        timeout=30,
+    )
+    if not register_res.ok:
+        raise RuntimeError(f"Pinterest media registration failed ({register_res.status_code}): {register_res.text}")
+    media_info = register_res.json()
+    media_id = media_info["media_id"]
+    upload_url = media_info["upload_url"]
+    upload_fields = media_info["upload_parameters"]
+
+    upload_res = requests.post(
+        upload_url, data=upload_fields, files={"file": ("video.mp4", video_bytes)}, timeout=120,
+    )
+    if not upload_res.ok:
+        raise RuntimeError(f"Pinterest video upload failed ({upload_res.status_code}): {upload_res.text}")
+
+    for attempt in range(15):
+        time.sleep(8)
+        status_res = robust_request(
+            "GET", f"https://api.pinterest.com/v5/media/{media_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+        status = status_res.json().get("status") if status_res.ok else None
+        print(f"Pinterest video processing status (attempt {attempt + 1}/15): {status}")
+        if status == "succeeded":
+            break
+        if status == "failed":
+            raise RuntimeError("Pinterest video processing failed (status=failed).")
+    else:
+        raise RuntimeError("Pinterest video never finished processing in time.")
+
+    pin_res = robust_request(
+        "POST", "https://api.pinterest.com/v5/pins",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={
+            "board_id": board_id,
+            "title": title[:100],
+            "description": description[:500],
+            "link": link,
+            "media_source": {
+                "source_type": "video_id",
+                "cover_image_url": cover_image_url,
+                "media_id": media_id,
+            },
+        },
+        timeout=60,
+    )
+    if not pin_res.ok:
+        raise RuntimeError(f"Pinterest video pin creation failed ({pin_res.status_code}): {pin_res.text}")
+    return pin_res.json()
+
+
 def submit_url_for_indexing(url):
     """
     Tell Google to (re)crawl this URL now, via the Indexing API, using the
@@ -893,6 +1092,39 @@ def post_to_facebook_page(message, link):
             return False
     except Exception as e:
         print(f"Facebook post failed (blog post is still published fine): {e}")
+        return False
+
+
+def post_facebook_video(description, video_url):
+    """
+    Posts a native video to the Facebook Page (used only for RUN_TYPE=video
+    runs) — this is a plain video post, NOT the clickable link-card that
+    post_to_facebook_page() makes, so it's posted as an ADDITIONAL post
+    alongside the usual link post rather than replacing it, to avoid losing
+    the click-through traffic the link card drives.
+    Never raises — returns True/False for the dashboard.
+    """
+    if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook video post.")
+        return False
+    try:
+        res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/videos",
+            data={
+                "file_url": video_url,
+                "description": description,
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=120,
+        )
+        if res.ok:
+            print("Posted Facebook video:", res.json().get("id"))
+            return True
+        else:
+            print(f"Facebook video post failed ({res.status_code}): {res.text}")
+            return False
+    except Exception as e:
+        print(f"Facebook video post failed (blog post is still published fine): {e}")
         return False
 
 
@@ -1011,6 +1243,68 @@ def post_to_instagram_carousel(caption, image_urls):
     except Exception as e:
         print(f"Instagram carousel failed ({e}), falling back to single-image post...")
         return post_to_instagram(caption, image_urls[0])
+
+
+def post_instagram_reel(caption, video_url):
+    """
+    Posts a Reel (used only for RUN_TYPE=video runs), replacing the usual
+    carousel for that run. Reels take longer to process than images, so
+    this polls the container's status_code until FINISHED (capped attempts)
+    before publishing, instead of a fixed sleep like the image/carousel
+    paths use. Never raises — returns True/False for the dashboard.
+    """
+    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
+        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram Reel.")
+        return False
+    try:
+        create_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+            data={
+                "media_type": "REELS",
+                "video_url": video_url,
+                "caption": caption,
+                "access_token": INSTAGRAM_ACCESS_TOKEN,
+            },
+            timeout=60,
+        )
+        if not create_res.ok:
+            print(f"Instagram Reel container failed ({create_res.status_code}): {create_res.text}")
+            return False
+        creation_id = create_res.json()["id"]
+
+        # Poll for processing to finish (video takes longer than an image).
+        for attempt in range(15):
+            time.sleep(10)
+            status_res = robust_request(
+                "GET", f"https://graph.facebook.com/v26.0/{creation_id}",
+                params={"fields": "status_code", "access_token": INSTAGRAM_ACCESS_TOKEN},
+                timeout=30,
+            )
+            status_code = status_res.json().get("status_code") if status_res.ok else None
+            print(f"Reel processing status (attempt {attempt + 1}/15): {status_code}")
+            if status_code == "FINISHED":
+                break
+            if status_code == "ERROR":
+                print("Instagram Reel processing failed (ERROR status).")
+                return False
+        else:
+            print("Instagram Reel never finished processing in time — skipping publish.")
+            return False
+
+        publish_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
+            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if publish_res.ok:
+            print("Posted Instagram Reel:", publish_res.json().get("id"))
+            return True
+        else:
+            print(f"Instagram Reel publish failed ({publish_res.status_code}): {publish_res.text}")
+            return False
+    except Exception as e:
+        print(f"Instagram Reel failed (blog post is still published fine): {e}")
+        return False
 
 
 STATUS_FILE = "status.json"
@@ -1140,34 +1434,10 @@ def main():
         committed_paths.append(ig_filepath)
         print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
 
-        # --- Extra Instagram carousel slides (quick-take card, a second
-        # hook photo, and a link-in-bio CTA card). No extra Pexels calls —
-        # the "photo" slide reuses raw_hero already downloaded above, and
-        # the two card slides are plain drawn backgrounds, so this stays
-        # free and doesn't add any new API dependency.
-        print("Preparing Instagram carousel slides (quick-take + CTA cards)...")
-        ig_slide2_compressed = build_text_card([
-            ("Quick Take", True),
-            (f"Cost: {total_cost_raw}", False),
-            (f"Time: {time_estimate_raw}", False),
-            (f"Difficulty: {difficulty_raw}", False),
-        ])
-        ig_slide2_filename = f"decor-{ts}-ig-quicktake.webp"
-        ig_slide2_filepath = os.path.join("images", ig_slide2_filename)
-        with open(ig_slide2_filepath, "wb") as f:
-            f.write(ig_slide2_compressed)
-        committed_paths.append(ig_slide2_filepath)
-
-        ig_slide3_compressed = finalize_pin_image(
-            raw_hero, "See The Full Tutorial", target_ratio=4 / 5
-        )
-        ig_slide3_filename = f"decor-{ts}-ig-tutorial.webp"
-        ig_slide3_filepath = os.path.join("images", ig_slide3_filename)
-        with open(ig_slide3_filepath, "wb") as f:
-            f.write(ig_slide3_compressed)
-        committed_paths.append(ig_slide3_filepath)
-
-        ig_slide4_compressed = build_text_card([
+        # --- CTA card (used two ways): last slide of the image-mode
+        # carousel, OR the closing segment of the video-mode Reel/video.
+        # Built once either way — no extra Pexels call, just drawn text.
+        ig_cta_compressed = build_text_card([
             ("Want The Full Guide", True),
             ("Tap the link in our bio", False),
             ("for the full step-by-step", False),
@@ -1175,9 +1445,66 @@ def main():
         ig_slide4_filename = f"decor-{ts}-ig-cta.webp"
         ig_slide4_filepath = os.path.join("images", ig_slide4_filename)
         with open(ig_slide4_filepath, "wb") as f:
-            f.write(ig_slide4_compressed)
+            f.write(ig_cta_compressed)
         committed_paths.append(ig_slide4_filepath)
-        print("Instagram carousel slides ready.")
+
+        reel_video_filepath = None
+        if RUN_TYPE == "video":
+            # --- Video-mode: fetch 2 real Pexels stock clips (generic
+            # topic-matching b-roll, same honesty scope as the stock photos
+            # used everywhere else in this script) and stitch them + the
+            # CTA card into one vertical Reel/video via ffmpeg.
+            print("Video-mode run: fetching Pexels stock video clips...")
+            clip_queries = [draft["image_prompt"]] + [
+                s.get("query", draft["image_prompt"]) for s in draft.get("section_images", [])
+            ][:1]
+            clip_bytes_list = []
+            for q in clip_queries[:2]:
+                try:
+                    clip_bytes_list.append(search_pexels_video(q))
+                except Exception as e:
+                    print(f"Pexels video search failed for '{q}': {e}")
+            if not clip_bytes_list:
+                # Last-resort generic query, so a run never fails purely
+                # because one specific search came back empty.
+                clip_bytes_list.append(search_pexels_video("home decor"))
+
+            print(f"Building Reel/video from {len(clip_bytes_list)} clip(s)...")
+            reel_video_bytes = build_reel_video(
+                clip_bytes_list, pin_hook, ig_cta_compressed,
+                work_dir=os.path.join("images", f"reel-work-{ts}"),
+            )
+            reel_video_filename = f"decor-{ts}-reel.mp4"
+            reel_video_filepath = os.path.join("images", reel_video_filename)
+            with open(reel_video_filepath, "wb") as f:
+                f.write(reel_video_bytes)
+            committed_paths.append(reel_video_filepath)
+            print(f"Reel/video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
+        else:
+            # --- Image-mode (default/morning run): the usual 2 extra
+            # carousel slides (quick-take card + second hook photo).
+            print("Preparing Instagram carousel slides (quick-take + CTA cards)...")
+            ig_slide2_compressed = build_text_card([
+                ("Quick Take", True),
+                (f"Cost: {total_cost_raw}", False),
+                (f"Time: {time_estimate_raw}", False),
+                (f"Difficulty: {difficulty_raw}", False),
+            ])
+            ig_slide2_filename = f"decor-{ts}-ig-quicktake.webp"
+            ig_slide2_filepath = os.path.join("images", ig_slide2_filename)
+            with open(ig_slide2_filepath, "wb") as f:
+                f.write(ig_slide2_compressed)
+            committed_paths.append(ig_slide2_filepath)
+
+            ig_slide3_compressed = finalize_pin_image(
+                raw_hero, "See The Full Tutorial", target_ratio=4 / 5
+            )
+            ig_slide3_filename = f"decor-{ts}-ig-tutorial.webp"
+            ig_slide3_filepath = os.path.join("images", ig_slide3_filename)
+            with open(ig_slide3_filepath, "wb") as f:
+                f.write(ig_slide3_compressed)
+            committed_paths.append(ig_slide3_filepath)
+            print("Instagram carousel slides ready.")
 
         # --- Facebook-optimized image (1.91:1 landscape — Facebook's actual
         # recommended link-preview ratio). Cropping the tall portrait hero
@@ -1220,9 +1547,12 @@ def main():
 
         hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
         ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
-        ig_slide2_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide2_filepath}"
-        ig_slide3_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide3_filepath}"
-        ig_slide4_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide4_filepath}"
+        if RUN_TYPE == "video":
+            reel_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{reel_video_filepath}"
+        else:
+            ig_slide2_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide2_filepath}"
+            ig_slide3_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide3_filepath}"
+            ig_slide4_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide4_filepath}"
         fb_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{fb_filepath}"
 
 
@@ -1366,20 +1696,39 @@ def main():
     print("Notifying Google Indexing API...")
     submit_url_for_indexing(post_url)
 
-    pin_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []))
+    # Pinterest keeps a modest hashtag count (its own norms lean lighter);
+    # Instagram/Facebook use a richer set from the same tag pool, since more
+    # hashtags there genuinely helps discovery rather than looking spammy.
+    pin_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []), max_tags=5)
+    social_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []), max_tags=15)
 
     meta_token_ok = check_meta_token_health()
     if not meta_token_ok:
         print("Skipping Facebook + Instagram posting this run — see the health check message above.")
         facebook_ok = False
         instagram_ok = False
+    elif RUN_TYPE == "video":
+        # Video-mode (evening run): a native Facebook video post (not a
+        # clickable link-card — accepted trade-off) and an Instagram Reel,
+        # instead of the morning run's link-post + carousel.
+        print("Posting Facebook video...")
+        fb_message = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\n{social_hashtags}"
+        facebook_ok = post_facebook_video(fb_message, reel_video_url)
+
+        print("Posting Instagram Reel...")
+        ig_caption = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
+        instagram_ok = post_instagram_reel(ig_caption, reel_video_url)
     else:
+        # Image-mode (morning run, default): the usual clickable link-post
+        # + carousel. Captions lead with the same punchy "pin_hook" line
+        # used on the image itself — Facebook/Instagram only show the first
+        # 1-2 lines before "See more", so the hook belongs first.
         print("Posting to Facebook Page...")
-        fb_message = f"{draft['title']}\n\n{social_description}\n\n{pin_hashtags}"
+        fb_message = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\n{social_hashtags}"
         facebook_ok = post_to_facebook_page(fb_message, post_url)
 
         print("Posting to Instagram (carousel)...")
-        ig_caption = f"{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{pin_hashtags}"
+        ig_caption = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
         instagram_ok = post_to_instagram_carousel(
             ig_caption, [ig_image_url, ig_slide2_url, ig_slide3_url, ig_slide4_url]
         )
@@ -1402,14 +1751,27 @@ def main():
     try:
         pinterest_token = get_pinterest_access_token()
         board_id = CATEGORY_BOARD_IDS.get(category, PINTEREST_BOARD_ID)
-        pin_result = create_pinterest_pin(
-            pinterest_token,
-            board_id=board_id,
-            title=draft["title"],
-            description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
-            link=post_url,
-            image_url=hero_url,
-        )
+        if RUN_TYPE == "video":
+            with open(reel_video_filepath, "rb") as f:
+                reel_video_bytes_for_pin = f.read()
+            pin_result = create_pinterest_video_pin(
+                pinterest_token,
+                board_id=board_id,
+                title=draft["title"],
+                description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
+                link=post_url,
+                video_bytes=reel_video_bytes_for_pin,
+                cover_image_url=hero_url,
+            )
+        else:
+            pin_result = create_pinterest_pin(
+                pinterest_token,
+                board_id=board_id,
+                title=draft["title"],
+                description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
+                link=post_url,
+                image_url=hero_url,
+            )
         print("Pinned:", pin_result.get("id"), "-> board:", board_id)
         pinterest_ok = True
     except Exception as e:
