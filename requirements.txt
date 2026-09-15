@@ -2,3 +2,4 @@ requests
 Pillow
 google-auth
 pynacl
+boto3
