@@ -86,6 +86,61 @@ INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
 # Auto-set by GitHub Actions as "owner/repo". Falls back for local testing.
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo")
 
+# --- Cloudflare R2 (image/video hosting) ---
+# Images and videos are uploaded here instead of being committed to the
+# GitHub repo, so the repo itself never grows — R2 has its own free
+# storage (10 GB) and serves files publicly on its own, with no git
+# history bloat over time.
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME")
+R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "").rstrip("/")
+
+_r2_client = None
+
+
+def get_r2_client():
+    """Lazily builds the boto3 S3-compatible client for Cloudflare R2."""
+    global _r2_client
+    if _r2_client is None:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            config=BotoConfig(signature_version="s3v4"),
+            region_name="auto",
+        )
+    return _r2_client
+
+
+_R2_CONTENT_TYPES = {
+    ".webp": "image/webp",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".mp4": "video/mp4",
+}
+
+
+def upload_to_r2(local_path):
+    """
+    Uploads a local file to the Cloudflare R2 bucket and returns its public
+    URL. This is what hero/section/carousel images and the video (in
+    video-mode) use instead of being committed to the git repo.
+    """
+    key = local_path.replace(os.sep, "/")
+    ext = os.path.splitext(local_path)[1].lower()
+    content_type = _R2_CONTENT_TYPES.get(ext, "application/octet-stream")
+    client = get_r2_client()
+    with open(local_path, "rb") as f:
+        client.put_object(Bucket=R2_BUCKET_NAME, Key=key, Body=f, ContentType=content_type)
+    return f"{R2_PUBLIC_URL}/{key}"
+
+
 # Controls which social-posting mode this run uses. Set via the GitHub
 # Actions workflow so the 6:30 AM trigger passes RUN_TYPE=image (current
 # carousel/link/image-pin behavior) and the 6:30 PM trigger passes
@@ -533,11 +588,22 @@ def normalize_draft(draft):
     return draft
 
 
-def search_pexels_image(query, orientation="portrait"):
+def search_pexels_image(query, orientation="portrait", used_photo_ids=None):
+    """
+    Finds a Pexels photo matching `query`. If `used_photo_ids` is given,
+    photos we've already used in previous posts are skipped — two posts
+    with similar queries would otherwise land on the exact same photo,
+    which looks like duplicate spam on Pinterest in particular. Falls back
+    to the full result set if every match has already been used, so a run
+    never fails just because a query's results are exhausted.
+    Returns (image_bytes, photo_id) so the caller can record the ID.
+    """
+    used_photo_ids = used_photo_ids or set()
+
     res = robust_request(
         "GET", "https://api.pexels.com/v1/search",
         headers={"Authorization": PEXELS_API_KEY},
-        params={"query": query, "orientation": orientation, "per_page": 15},
+        params={"query": query, "orientation": orientation, "per_page": 30},
         timeout=30,
     )
     if not res.ok:
@@ -548,7 +614,7 @@ def search_pexels_image(query, orientation="portrait"):
         res = robust_request(
             "GET", "https://api.pexels.com/v1/search",
             headers={"Authorization": PEXELS_API_KEY},
-            params={"query": "home decor", "orientation": orientation, "per_page": 15},
+            params={"query": "home decor", "orientation": orientation, "per_page": 30},
             timeout=30,
         )
         if not res.ok:
@@ -557,13 +623,16 @@ def search_pexels_image(query, orientation="portrait"):
         if not photos:
             raise RuntimeError(f"No Pexels photos found for query: {query}")
 
-    photo = random.choice(photos)
+    unused = [p for p in photos if p["id"] not in used_photo_ids]
+    if not unused:
+        print(f"All Pexels results for '{query}' were already used — reusing one anyway.")
+    photo = random.choice(unused or photos)
+
     image_url = photo["src"]["large2x"]
     image_res = robust_request("GET", image_url, timeout=30)
     if not image_res.ok:
         raise RuntimeError(f"Pexels image download failed ({image_res.status_code})")
-    return image_res.content
-
+    return image_res.content, photo["id"]
 
 
 def compress_image(image_bytes, max_width=1200, quality=78):
@@ -895,6 +964,12 @@ def git_commit_and_push(paths, message, max_attempts=3):
             raise RuntimeError("git push failed after retries — see logs above for git's error output.")
         print(f"git push failed (attempt {attempt}/{max_attempts}), "
               f"pulling latest changes and retrying...")
+        # Unshallow first: this repo is checked out with fetch-depth=1 for
+        # speed, but `git pull --rebase` needs real history to rebase onto
+        # and can fail unpredictably on a shallow clone. This only costs
+        # extra time on the rare occasion a retry is actually needed (e.g.
+        # a manual run overlapping the scheduled one), never on a normal run.
+        subprocess.run(["git", "fetch", "--unshallow"], check=False)
         subprocess.run(["git", "pull", "--rebase"], check=True)
 
 
@@ -1550,18 +1625,30 @@ def main():
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         os.makedirs("images", exist_ok=True)
-        committed_paths = []
+
+        # Photos used in previous posts, so this run can pick different ones
+        # (two posts with similar queries would otherwise land on the exact
+        # same photo, which reads as duplicate spam on Pinterest). Tracked
+        # per-run in history; older entries simply have no photo_ids key.
+        used_photo_ids = set()
+        for h in history:
+            used_photo_ids.update(h.get("photo_ids", []))
+        this_run_photo_ids = []
 
         # --- Hero image (vertical, with the Pinterest text hook baked in) ---
         print("Finding hero (Pinterest) photo...")
-        raw_hero = search_pexels_image(draft["image_prompt"], orientation="portrait")
+        raw_hero, hero_photo_id = search_pexels_image(
+            draft["image_prompt"], orientation="portrait", used_photo_ids=used_photo_ids
+        )
+        this_run_photo_ids.append(hero_photo_id)
+        used_photo_ids.add(hero_photo_id)
         pin_hook = draft.get("pin_hook", draft["title"])
         hero_compressed = finalize_pin_image(raw_hero, pin_hook)
         hero_filename = f"decor-{ts}-hero.webp"
         hero_filepath = os.path.join("images", hero_filename)
         with open(hero_filepath, "wb") as f:
             f.write(hero_compressed)
-        committed_paths.append(hero_filepath)
+        hero_url = upload_to_r2(hero_filepath)
         print(f"Hero image compressed to {len(hero_compressed) / 1024:.1f} KB")
 
         # --- Instagram-optimized image (4:5, Instagram's recommended feed
@@ -1574,7 +1661,7 @@ def main():
         ig_filepath = os.path.join("images", ig_filename)
         with open(ig_filepath, "wb") as f:
             f.write(ig_compressed)
-        committed_paths.append(ig_filepath)
+        ig_image_url = upload_to_r2(ig_filepath)
         print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
 
         # --- Quick-take card (used two ways): a carousel slide in
@@ -1590,7 +1677,7 @@ def main():
         ig_slide2_filepath = os.path.join("images", ig_slide2_filename)
         with open(ig_slide2_filepath, "wb") as f:
             f.write(ig_quicktake_compressed)
-        committed_paths.append(ig_slide2_filepath)
+        ig_slide2_url = upload_to_r2(ig_slide2_filepath)
 
         # --- CTA card (used two ways): last slide of the image-mode
         # carousel, OR the closing slide of the video-mode slideshow.
@@ -1604,7 +1691,7 @@ def main():
         ig_slide4_filepath = os.path.join("images", ig_slide4_filename)
         with open(ig_slide4_filepath, "wb") as f:
             f.write(ig_cta_compressed)
-        committed_paths.append(ig_slide4_filepath)
+        ig_slide4_url = upload_to_r2(ig_slide4_filepath)
 
         if RUN_TYPE != "video":
             # --- Image-mode (default/morning run): the 3rd carousel slide
@@ -1616,7 +1703,7 @@ def main():
             ig_slide3_filepath = os.path.join("images", ig_slide3_filename)
             with open(ig_slide3_filepath, "wb") as f:
                 f.write(ig_slide3_compressed)
-            committed_paths.append(ig_slide3_filepath)
+            ig_slide3_url = upload_to_r2(ig_slide3_filepath)
             print("Instagram carousel slides ready.")
 
         # --- Facebook-optimized image (1.91:1 landscape — Facebook's actual
@@ -1624,13 +1711,17 @@ def main():
         # down to this ratio would leave only a thin strip, so we fetch a
         # genuinely landscape source photo instead, with its own text overlay.
         print("Preparing Facebook-optimized image (1.91:1)...")
-        raw_fb = search_pexels_image(draft["image_prompt"], orientation="landscape")
+        raw_fb, fb_photo_id = search_pexels_image(
+            draft["image_prompt"], orientation="landscape", used_photo_ids=used_photo_ids
+        )
+        this_run_photo_ids.append(fb_photo_id)
+        used_photo_ids.add(fb_photo_id)
         fb_compressed = finalize_pin_image(raw_fb, pin_hook, target_ratio=1.91)
         fb_filename = f"decor-{ts}-fb.webp"
         fb_filepath = os.path.join("images", fb_filename)
         with open(fb_filepath, "wb") as f:
             f.write(fb_compressed)
-        committed_paths.append(fb_filepath)
+        fb_image_url = upload_to_r2(fb_filepath)
         print(f"Facebook image compressed to {len(fb_compressed) / 1024:.1f} KB")
 
 
@@ -1642,17 +1733,18 @@ def main():
             token = section.get("token", f"IMG_{i+1}")
             query = section.get("query", draft["image_prompt"])
             print(f"Finding section photo for {token}: {query}")
-            raw_section = search_pexels_image(query, orientation="landscape")
+            raw_section, section_photo_id = search_pexels_image(
+                query, orientation="landscape", used_photo_ids=used_photo_ids
+            )
+            this_run_photo_ids.append(section_photo_id)
+            used_photo_ids.add(section_photo_id)
             section_compressed = compress_image(raw_section)
             section_filename = f"decor-{ts}-{token.lower()}.webp"
             section_filepath = os.path.join("images", section_filename)
             with open(section_filepath, "wb") as f:
                 f.write(section_compressed)
-            committed_paths.append(section_filepath)
-            section_urls[token] = (
-                f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{section_filepath}",
-                query,
-            )
+            section_url = upload_to_r2(section_filepath)
+            section_urls[token] = (section_url, query)
 
         reel_video_filepath = None
         pin_cover_filepath = None
@@ -1705,7 +1797,7 @@ def main():
             reel_video_filepath = os.path.join("images", reel_video_filename)
             with open(reel_video_filepath, "wb") as f:
                 f.write(reel_video_bytes)
-            committed_paths.append(reel_video_filepath)
+            reel_video_url = upload_to_r2(reel_video_filepath)
             print(f"Video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
 
             # Pinterest's video-pin cover_image_url rejects WebP (every
@@ -1718,22 +1810,11 @@ def main():
             pin_cover_filepath = os.path.join("images", pin_cover_filename)
             with open(pin_cover_filepath, "wb") as f:
                 f.write(pin_cover_out.getvalue())
-            committed_paths.append(pin_cover_filepath)
+            pin_cover_url = upload_to_r2(pin_cover_filepath)
 
-        print("Committing images to the repo...")
-        git_commit_and_push(committed_paths, f"Auto post images: {draft['title']}")
-        time.sleep(8)
-
-        hero_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{hero_filepath}"
-        ig_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_filepath}"
-        if RUN_TYPE == "video":
-            reel_video_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{reel_video_filepath}"
-            pin_cover_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{pin_cover_filepath}"
-        else:
-            ig_slide2_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide2_filepath}"
-            ig_slide3_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide3_filepath}"
-            ig_slide4_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{ig_slide4_filepath}"
-        fb_image_url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/{fb_filepath}"
+        # Images/video are already uploaded to R2 individually above — no
+        # git commit needed for them (that's the whole point of moving off
+        # GitHub-hosted images: the repo no longer grows with every post).
 
 
         # Section images are real <img> tags with proper alt text — this
@@ -1935,6 +2016,7 @@ def main():
         "category": draft.get("category"),
         "date": datetime.now(timezone.utc).isoformat(),
         "url": post_url,
+        "photo_ids": this_run_photo_ids,
     })
     save_history(history)
 
