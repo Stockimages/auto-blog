@@ -32,6 +32,7 @@ import textwrap
 import random
 import time
 import smtplib
+import urllib.parse
 from email.mime.text import MIMEText
 from io import BytesIO
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ from PIL import Image, ImageDraw, ImageFont
 # ---- Required secrets / env vars (set these as GitHub Actions secrets) ----
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 BLOGGER_BLOG_ID = os.environ["BLOGGER_BLOG_ID"]
+SITE_URL = "https://decorvibeto.com"
 GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
@@ -1733,18 +1735,26 @@ def main():
             token = section.get("token", f"IMG_{i+1}")
             query = section.get("query", draft["image_prompt"])
             print(f"Finding section photo for {token}: {query}")
-            raw_section, section_photo_id = search_pexels_image(
-                query, orientation="landscape", used_photo_ids=used_photo_ids
-            )
-            this_run_photo_ids.append(section_photo_id)
-            used_photo_ids.add(section_photo_id)
-            section_compressed = compress_image(raw_section)
-            section_filename = f"decor-{ts}-{token.lower()}.webp"
-            section_filepath = os.path.join("images", section_filename)
-            with open(section_filepath, "wb") as f:
-                f.write(section_compressed)
-            section_url = upload_to_r2(section_filepath)
-            section_urls[token] = (section_url, query)
+            try:
+                raw_section, section_photo_id = search_pexels_image(
+                    query, orientation="landscape", used_photo_ids=used_photo_ids
+                )
+                this_run_photo_ids.append(section_photo_id)
+                used_photo_ids.add(section_photo_id)
+                section_compressed = compress_image(raw_section)
+                section_filename = f"decor-{ts}-{token.lower()}.webp"
+                section_filepath = os.path.join("images", section_filename)
+                with open(section_filepath, "wb") as f:
+                    f.write(section_compressed)
+                section_url = upload_to_r2(section_filepath)
+                section_urls[token] = (section_url, query)
+            except Exception as e:
+                # One section photo failing (rare network/API hiccup)
+                # shouldn't crash a run where the hero image, Facebook
+                # image, and the rest of the article are already done —
+                # skip just this section's image; its [[IMG_n]] placeholder
+                # gets cleaned up below like any other unmatched token.
+                print(f"Section photo for {token} failed, skipping it: {e}")
 
         reel_video_filepath = None
         pin_cover_filepath = None
@@ -1932,6 +1942,25 @@ def main():
             f"{json.dumps(article_schema, ensure_ascii=False)}</script>"
         )
 
+        # --- Breadcrumb schema (JSON-LD) — mirrors the visible on-site
+        # breadcrumb (Home > Category > Post title). The last item is the
+        # current page itself, so it deliberately has no "item" URL (Google's
+        # own guidance: the final breadcrumb entry doesn't need one).
+        category_url = f"{SITE_URL}/search/label/{urllib.parse.quote(category)}"
+        breadcrumb_schema = {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Home", "item": SITE_URL},
+                {"@type": "ListItem", "position": 2, "name": category, "item": category_url},
+                {"@type": "ListItem", "position": 3, "name": draft["title"]},
+            ],
+        }
+        breadcrumb_schema_html = (
+            '<script type="application/ld+json">'
+            f"{json.dumps(breadcrumb_schema, ensure_ascii=False)}</script>"
+        )
+
         # Hidden square image placed FIRST so it becomes the page's og:image
         # (Blogger uses the first <img> in the post body for that) — this is
         # what Facebook's link-share card shows. display:none keeps it
@@ -1941,7 +1970,7 @@ def main():
             hidden_og_img +
             f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n'
             f'{quick_take_html}\n{body_html}\n{related_posts_html}\n{faq_html}\n'
-            f'{author_bio_html}\n{faq_schema_html}\n{article_schema_html}'
+            f'{author_bio_html}\n{faq_schema_html}\n{article_schema_html}\n{breadcrumb_schema_html}'
         )
         social_description = extract_pin_description(draft["html"])
 
