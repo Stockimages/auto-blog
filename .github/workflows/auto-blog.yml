@@ -15,6 +15,14 @@ on:
 permissions:
   contents: write   # needed so the script can commit the generated image/video back to the repo
 
+# If two runs ever get triggered close together (e.g. a manual test run
+# overlapping the scheduled cron-job.org trigger), this queues the second
+# one instead of letting both run at once — avoids racing on
+# topics_history.json and duplicate near-simultaneous posts.
+concurrency:
+  group: auto-blog-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
