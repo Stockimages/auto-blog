@@ -208,6 +208,22 @@ CATEGORY_BOARD_IDS = {
     "General Decor": "1123014925773074374",
 }
 
+# A small, fixed set of emoji used ONLY in Facebook/Instagram captions (never
+# in the hook line itself, and never on Pinterest or Blogger — both of those
+# are search-driven platforms where 2026 best practice is to stay
+# emoji-free and keyword-focused; Facebook/Instagram are scroll-feed
+# platforms where 2-3 tasteful emoji measurably help engagement/CTR).
+CATEGORY_EMOJIS = {
+    "Living Room": "🛋️",
+    "Bedroom": "🛏️",
+    "Kitchen": "🍽️",
+    "Bathroom": "🛁",
+    "Small Spaces": "📦",
+    "Entryway": "🚪",
+    "Outdoor": "🌿",
+    "General Decor": "🏠",
+}
+
 # Words/phrases that make AI writing sound canned. Gemini is told to avoid these.
 BANNED_PHRASES = [
     "elevate", "delve", "unlock", "unleash", "seamless", "seamlessly",
@@ -415,7 +431,7 @@ Also write:
 
 Return ONLY valid JSON. No markdown fences, no commentary before or after.
 {{
-  "title": "a specific, honest, clickable title",
+  "title": "a specific, honest, clickable title. Plain text only — no emoji (this is an SEO title indexed by Google, and keyword clarity matters more than decoration there)",
   "category": "EXACTLY one of the fixed categories listed above",
   "pin_hook": "...",
   "hashtag_tags": ["8-12 short descriptive style/content tags for social hashtags only (Instagram/Facebook use more of these than Pinterest does), e.g. thrift flip, diy, budget decor, home makeover, thrifted finds — these do NOT affect the site's category"],
@@ -1289,14 +1305,17 @@ def check_meta_token_health():
         return False
 
 
-def post_to_facebook_page(message, link):
+def post_to_facebook_page(message, image_url, link):
     """
-    Posts a link to the Facebook Page's feed — the whole preview card
-    (image + headline) is clickable straight through to the blog post,
-    which matters more here than exact image control since driving clicks
-    is the whole point. Facebook builds the card from the page's og:image,
-    which we control separately via a hidden square image placed first in
-    the post's HTML (see main()).
+    Posts a native photo to the Facebook Page (reusing the same 4:5 image
+    made for Instagram — also Facebook's own recommended feed ratio as of
+    2026), then adds the blog link as a follow-up comment. `message`
+    (built by the caller) uses a plain CTA phrase rather than the raw URL,
+    since a literal link in the caption text costs organic reach even
+    without using the API's "link" field — the actual clickable URL lives
+    only in the comment, which is guaranteed visible since it's the post's
+    first (usually only) comment, even though programmatically PINNING a
+    comment isn't reliably supported by the Graph API.
     Never raises — if this fails or isn't configured, the post is still
     published everywhere else fine. Returns True/False for the dashboard.
     """
@@ -1306,20 +1325,39 @@ def post_to_facebook_page(message, link):
 
     try:
         res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/feed",
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/photos",
             data={
-                "message": message,
-                "link": link,
+                "url": image_url,
+                "caption": message,
                 "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
             },
             timeout=30,
         )
-        if res.ok:
-            print("Posted to Facebook:", res.json().get("id"))
-            return True
-        else:
+        if not res.ok:
             print(f"Facebook post failed ({res.status_code}): {res.text}")
             return False
+
+        result = res.json()
+        post_id = result.get("post_id") or result.get("id")
+        print("Posted to Facebook:", post_id)
+
+        # Also add the link as a comment — wrapped separately so a comment
+        # failure doesn't undo the fact that the photo post itself (with
+        # the link already in its caption) already succeeded.
+        try:
+            comment_res = robust_request(
+                "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                timeout=30,
+            )
+            if comment_res.ok:
+                print("Added link comment:", comment_res.json().get("id"))
+            else:
+                print(f"Facebook link-comment failed ({comment_res.status_code}): {comment_res.text}")
+        except Exception as e:
+            print(f"Facebook link-comment failed (post itself is still published fine): {e}")
+
+        return True
     except Exception as e:
         print(f"Facebook post failed (blog post is still published fine): {e}")
         return False
@@ -1708,23 +1746,11 @@ def main():
             ig_slide3_url = upload_to_r2(ig_slide3_filepath)
             print("Instagram carousel slides ready.")
 
-        # --- Facebook-optimized image (1.91:1 landscape — Facebook's actual
-        # recommended link-preview ratio). Cropping the tall portrait hero
-        # down to this ratio would leave only a thin strip, so we fetch a
-        # genuinely landscape source photo instead, with its own text overlay.
-        print("Preparing Facebook-optimized image (1.91:1)...")
-        raw_fb, fb_photo_id = search_pexels_image(
-            draft["image_prompt"], orientation="landscape", used_photo_ids=used_photo_ids
-        )
-        this_run_photo_ids.append(fb_photo_id)
-        used_photo_ids.add(fb_photo_id)
-        fb_compressed = finalize_pin_image(raw_fb, pin_hook, target_ratio=1.91)
-        fb_filename = f"decor-{ts}-fb.webp"
-        fb_filepath = os.path.join("images", fb_filename)
-        with open(fb_filepath, "wb") as f:
-            f.write(fb_compressed)
-        fb_image_url = upload_to_r2(fb_filepath)
-        print(f"Facebook image compressed to {len(fb_compressed) / 1024:.1f} KB")
+        # Facebook now reuses the same hero image used on Pinterest/Instagram
+        # (see below) — no separate Facebook-specific image is generated
+        # anymore, since Facebook posting switched from a link-share (which
+        # needed its own landscape preview image) to a native photo post
+        # with the blog link moved to a comment.
 
 
 
@@ -1961,13 +1987,13 @@ def main():
             f"{json.dumps(breadcrumb_schema, ensure_ascii=False)}</script>"
         )
 
-        # Hidden square image placed FIRST so it becomes the page's og:image
-        # (Blogger uses the first <img> in the post body for that) — this is
-        # what Facebook's link-share card shows. display:none keeps it
-        # invisible to actual readers, who see only the normal hero below.
-        hidden_og_img = f'<img src="{fb_image_url}" alt="" style="display:none;" />\n'
+        # The hero image is simply the first <img> in the post — Blogger
+        # uses whatever image appears first as the page's og:image, which
+        # used to require a separate hidden landscape image specifically
+        # for Facebook's link-preview card. That's no longer needed since
+        # Facebook posting switched to a native photo post (see below),
+        # which doesn't generate a link-preview card at all.
         full_html = (
-            hidden_og_img +
             f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n'
             f'{quick_take_html}\n{body_html}\n{related_posts_html}\n{faq_html}\n'
             f'{author_bio_html}\n{faq_schema_html}\n{article_schema_html}\n{breadcrumb_schema_html}'
@@ -2024,16 +2050,26 @@ def main():
         ig_caption = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
         instagram_ok = post_instagram_reel(ig_caption, reel_video_url)
     else:
-        # Image-mode (morning run, default): the usual clickable link-post
-        # + carousel. Captions lead with the same punchy "pin_hook" line
-        # used on the image itself — Facebook/Instagram only show the first
-        # 1-2 lines before "See more", so the hook belongs first.
+        # Image-mode (morning run, default): native photo post reusing the
+        # same 4:5 image made for Instagram (Facebook's own recommended
+        # feed ratio too, as of 2026). The caption uses a plain CTA phrase
+        # instead of the raw URL — a literal link in the caption text still
+        # costs reach even without the "link" API field — while the actual
+        # clickable link goes in a follow-up comment (see
+        # post_to_facebook_page) for guaranteed one-tap access. Captions
+        # lead with the same punchy "pin_hook" line used on the image
+        # itself — Facebook/Instagram only show the first 1-2 lines before
+        # "See more".
         print("Posting to Facebook Page...")
-        fb_message = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\n{social_hashtags}"
-        facebook_ok = post_to_facebook_page(fb_message, post_url)
+        category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
+        fb_message = (
+            f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
+            f"👉 Visit our website for the full step-by-step guide!\n\n{social_hashtags}"
+        )
+        facebook_ok = post_to_facebook_page(fb_message, ig_image_url, post_url)
 
         print("Posting to Instagram (carousel)...")
-        ig_caption = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
+        ig_caption = f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
         instagram_ok = post_to_instagram_carousel(
             ig_caption, [ig_image_url, ig_slide2_url, ig_slide3_url, ig_slide4_url]
         )
