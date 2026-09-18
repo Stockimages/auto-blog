@@ -55,6 +55,7 @@ jobs:
           PINTEREST_REFRESH_TOKEN: ${{ secrets.PINTEREST_REFRESH_TOKEN }}
           PINTEREST_BOARD_ID: ${{ secrets.PINTEREST_BOARD_ID }}
           GOOGLE_INDEXING_KEY: ${{ secrets.GOOGLE_INDEXING_KEY }}
+          BING_API_KEY: ${{ secrets.BING_API_KEY }}
           GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
           FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
           FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
