@@ -56,6 +56,11 @@ PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
 # to be discovered via the sitemap on its own schedule.
 GOOGLE_INDEXING_KEY = os.environ.get("GOOGLE_INDEXING_KEY")
 
+# Bing Webmaster Submission API key — lets us tell Bing to (re)crawl a new
+# post immediately. Bing's own index also powers Yahoo and DuckDuckGo
+# results, so this one call effectively covers all three.
+BING_API_KEY = os.environ.get("BING_API_KEY")
+
 # Personal access token with "Secrets: read and write" permission on this repo
 # only — used to auto-update the PINTEREST_REFRESH_TOKEN secret when Pinterest
 # rotates it, so no manual copy-paste is ever needed.
@@ -1274,6 +1279,36 @@ def submit_url_for_indexing(url):
         print(f"Indexing API submission failed (post still published fine): {e}")
 
 
+def submit_to_bing(url):
+    """
+    Tell Bing to (re)crawl this URL now, via the Bing Webmaster Submission
+    API, using the site-linked apikey stored in BING_API_KEY. Bing's index
+    also backs Yahoo and DuckDuckGo, so this one call effectively notifies
+    all three. Never raises — if this fails or isn't configured, the post
+    is still published and still gets indexed eventually on Bing's normal
+    sitemap crawl, just slower.
+    """
+    if not BING_API_KEY:
+        print("BING_API_KEY not set — skipping Bing instant indexing "
+              "(post will still be found via the sitemap eventually).")
+        return
+
+    try:
+        res = robust_request(
+            "POST",
+            f"https://ssl.bing.com/webmaster/api.svc/json/SubmitUrl?apikey={BING_API_KEY}",
+            headers={"Content-Type": "application/json"},
+            json={"siteUrl": SITE_URL, "url": url},
+            timeout=30,
+        )
+        if res.ok:
+            print("Submitted to Bing Submission API:", url)
+        else:
+            print(f"Bing Submission API call failed ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"Bing Submission API call failed (post still published fine): {e}")
+
+
 def check_meta_token_health():
     """
     Quick pre-flight check for the Facebook/Instagram Page Access Token,
@@ -2026,6 +2061,9 @@ def main():
 
     print("Notifying Google Indexing API...")
     submit_url_for_indexing(post_url)
+
+    print("Notifying Bing Submission API...")
+    submit_to_bing(post_url)
 
     # Pinterest keeps a modest hashtag count (its own norms lean lighter);
     # Instagram/Facebook use a richer set from the same tag pool, since more
