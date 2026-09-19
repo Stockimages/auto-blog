@@ -165,18 +165,16 @@ def upload_to_r2(local_path):
 # carousel/link/image-pin behavior) and the 6:30 PM trigger passes
 # RUN_TYPE=video (Reel/native-video/video-pin behavior). Defaults to
 # "image" so nothing changes if the workflow doesn't set it.
-# Video-mode was tried and disabled: Pexels' stock VIDEO library is far
-# smaller/more generic than its photo library, so specific decor-topic
-# searches (e.g. "pocket rack") kept falling back to unrelated generic
-# clips (e.g. "metal wire grid panel") — a content-matching problem with
-# no reliable fix. RUN_TYPE is forced to "image" here rather than removing
-# the video functions below, so the evening cron-job.org trigger (which
-# still sends RUN_TYPE=video) doesn't need to be edited — it just gets
-# image-mode behavior too, same as the morning run.
-RUN_TYPE = "image"
-_requested_run_type = os.environ.get("RUN_TYPE", "image").strip().lower()
-if _requested_run_type != RUN_TYPE:
-    print(f"RUN_TYPE={_requested_run_type} was requested, but video-mode is disabled — running in image-mode.")
+#
+# Video-mode was previously tried and disabled because it used Pexels'
+# stock VIDEO library, which is far smaller/more generic than its photo
+# library and kept falling back to unrelated generic clips for specific
+# decor topics. That pipeline has since been replaced: video-mode now
+# builds its slides from the SAME real hero/section images already
+# generated for the article (Ken Burns zoom + an AI voiceover via
+# Edge-TTS), so the content-matching problem this override existed for no
+# longer applies. Re-enabled as of the voiceover rewrite.
+RUN_TYPE = os.environ.get("RUN_TYPE", "image").strip().lower()
 
 # Model name — Google updates these periodically. If a run starts failing
 # with a 404 "model not found" error, check the current name in Google AI
