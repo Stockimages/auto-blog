@@ -38,6 +38,7 @@ from io import BytesIO
 from datetime import datetime, timezone
 
 import requests
+from requests_oauthlib import OAuth1Session
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from PIL import Image, ImageDraw, ImageFont
@@ -75,6 +76,15 @@ PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
 # Facebook Page — auto-posts a link to the Page right after each Blogger post.
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
+
+# Tumblr — auto-posts a photo pointing back to each new Blogger post.
+# Unlike Medium, Tumblr's OAuth 1.0a API is still open/self-service, so this
+# is a normal, fully-supported integration (no session cookies, no risk).
+TUMBLR_CONSUMER_KEY = os.environ.get("TUMBLR_CONSUMER_KEY")
+TUMBLR_CONSUMER_SECRET = os.environ.get("TUMBLR_CONSUMER_SECRET")
+TUMBLR_ACCESS_TOKEN = os.environ.get("TUMBLR_ACCESS_TOKEN")
+TUMBLR_ACCESS_TOKEN_SECRET = os.environ.get("TUMBLR_ACCESS_TOKEN_SECRET")
+TUMBLR_BLOG_NAME = os.environ.get("TUMBLR_BLOG_NAME")
 
 # Phone notification (via Gmail App Password + SMTP) — sends a summary
 # email to your own inbox after each run, so a push notification shows up
@@ -1398,7 +1408,46 @@ def post_to_facebook_page(message, image_url, link):
         return False
 
 
-def post_facebook_video(description, video_url):
+def post_to_tumblr(caption, image_url, link):
+    """
+    Posts a native photo post to the Tumblr blog via Tumblr's official
+    OAuth 1.0a API (Neue Post Format), with the blog link attached as a
+    clickable link block. Never raises — if this fails or isn't
+    configured, the post is still published everywhere else fine.
+    """
+    if not all([TUMBLR_CONSUMER_KEY, TUMBLR_CONSUMER_SECRET,
+                TUMBLR_ACCESS_TOKEN, TUMBLR_ACCESS_TOKEN_SECRET, TUMBLR_BLOG_NAME]):
+        print("Tumblr credentials not fully set — skipping Tumblr post.")
+        return False
+
+    try:
+        oauth = OAuth1Session(
+            TUMBLR_CONSUMER_KEY,
+            client_secret=TUMBLR_CONSUMER_SECRET,
+            resource_owner_key=TUMBLR_ACCESS_TOKEN,
+            resource_owner_secret=TUMBLR_ACCESS_TOKEN_SECRET,
+        )
+        res = oauth.post(
+            f"https://api.tumblr.com/v2/blog/{TUMBLR_BLOG_NAME}/posts",
+            json={
+                "content": [
+                    {"type": "image", "media": [{"url": image_url}]},
+                    {"type": "text", "text": caption},
+                    {"type": "link", "url": link, "display_url": link,
+                     "title": "Read the full post"},
+                ],
+            },
+            timeout=30,
+        )
+        if res.ok:
+            print("Posted to Tumblr:", res.json().get("response", {}).get("id"))
+            return True
+        else:
+            print(f"Tumblr post failed ({res.status_code}): {res.text}")
+            return False
+    except Exception as e:
+        print(f"Tumblr post failed (blog post is still published fine): {e}")
+        return False
     """
     Posts a native video to the Facebook Page (used only for RUN_TYPE=video
     runs) — this is a plain video post, NOT the clickable link-card that
@@ -1636,7 +1685,7 @@ def send_phone_notification(subject, body):
         print(f"Could not send phone notification (non-fatal): {e}")
 
 
-def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok):
+def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok, tumblr_ok=False):
     """
     Writes a small status.json the control panel reads to show a simple
     green-tick/red-cross per platform for the most recent run, with when
@@ -1648,6 +1697,7 @@ def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok
         "facebook": {"success": facebook_ok, "timestamp": now},
         "pinterest": {"success": pinterest_ok, "timestamp": now},
         "instagram": {"success": instagram_ok, "timestamp": now},
+        "tumblr": {"success": tumblr_ok, "timestamp": now},
     }
     with open(STATUS_FILE, "w") as f:
         json.dump(status, f, indent=2)
@@ -2157,9 +2207,14 @@ def main():
     except Exception as e:
         print(f"Pinterest post failed (blog post is still published fine): {e}")
 
+    print("Posting to Tumblr...")
+    tumblr_caption = f"{draft['title']}\n\n{social_description}\n\n{social_hashtags}"
+    tumblr_ok = post_to_tumblr(tumblr_caption, hero_url, post_url)
+
     save_status(
         blogger_ok=True, blogger_url=post_url,
         facebook_ok=facebook_ok, pinterest_ok=pinterest_ok, instagram_ok=instagram_ok,
+        tumblr_ok=tumblr_ok,
     )
     print("Committing history + status...")
     git_commit_and_push([HISTORY_FILE, STATUS_FILE], f"Auto post history: {draft['title']}")
@@ -2173,7 +2228,8 @@ def main():
         f"Blogger: {tick(True)}\n"
         f"Facebook: {tick(facebook_ok)}\n"
         f"Instagram: {tick(instagram_ok)}\n"
-        f"Pinterest: {tick(pinterest_ok)}",
+        f"Pinterest: {tick(pinterest_ok)}\n"
+        f"Tumblr: {tick(tumblr_ok)}",
     )
 
 
