@@ -31,6 +31,7 @@ import subprocess
 import textwrap
 import random
 import time
+import asyncio
 import smtplib
 import urllib.parse
 from email.mime.text import MIMEText
@@ -39,6 +40,7 @@ from datetime import datetime, timezone
 
 import requests
 from requests_oauthlib import OAuth1Session
+import edge_tts
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from PIL import Image, ImageDraw, ImageFont
@@ -443,6 +445,15 @@ Also write:
   "token" (e.g. "IMG_1") and a "query" (3-5 keyword search terms for a real,
   horizontal photo matching that section of the article — no people's faces,
   no text).
+- "reel_script": a short spoken-word voiceover script for a ~20-25 second
+  vertical video (Instagram Reel / TikTok), 55-75 words total, written to be
+  read aloud by an AI voice — NOT the article text. Structure:
+  1. A punchy 1-sentence hook (curiosity or the transformation/price angle).
+  2. 2-3 short, concrete tip/step sentences pulled from the real project.
+  3. End with EXACTLY this call-to-action sentence, verbatim: "Full tutorial —
+     link in bio!"
+  Write it like natural spoken American English: short sentences,
+  contractions, no filler, no markdown, no quotation marks inside the string.
 
 Return ONLY valid JSON. No markdown fences, no commentary before or after.
 {{
@@ -463,7 +474,8 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "section_images": [
     {{"token": "IMG_1", "query": "..."}},
     {{"token": "IMG_2", "query": "..."}}
-  ]
+  ],
+  "reel_script": "..."
 }}"""
 
     max_attempts = 3
@@ -575,6 +587,14 @@ def normalize_draft(draft):
     if not draft.get("image_prompt"):
         warn("image_prompt", "the title as the search query")
         draft["image_prompt"] = draft["title"]
+
+    if not draft.get("reel_script") or not isinstance(draft.get("reel_script"), str):
+        warn("reel_script", "a generated fallback built from the title/pin_hook")
+        draft["reel_script"] = (
+            f"{draft.get('pin_hook', draft['title'])}. "
+            f"Here's how to get the look for way less. "
+            f"Full tutorial — link in bio!"
+        )
 
     if not isinstance(draft.get("section_images"), list):
         warn("section_images", "no section images")
@@ -775,100 +795,141 @@ def build_caption_overlay_png(text, width=1080, position="top"):
     return out.getvalue()
 
 
-def build_reel_video(slides, work_dir):
+def synthesize_voiceover(script_text, out_path, voice="en-US-ChristopherNeural"):
     """
-    Builds a vertical (1080x1920) MP4 from a mix of real Pexels video clips
-    (the "process" steps + a final "result" shot — generic topic-matching
-    b-roll, not this specific fictional project's real footage) and static
-    image cards (the CTA card), stitched in order so the video reads as a
-    step-by-step walkthrough: process clips -> result shot -> CTA.
+    Converts the reel script to speech via Microsoft Edge-TTS (free,
+    unlimited, no API key). en-US-ChristopherNeural is a deep, natural
+    American voice that reads well for short-form motivational/how-to
+    content. Writes an mp3 to out_path.
+    """
+    async def _run():
+        communicate = edge_tts.Communicate(script_text, voice)
+        await communicate.save(out_path)
 
-    `slides` is a list of dicts, each either:
-      {"kind": "video", "bytes": <mp4 bytes>, "caption": str or None, "duration": seconds}
-      {"kind": "image", "bytes": <image bytes>, "caption": str or None, "duration": seconds}
+    asyncio.run(_run())
 
-    Captions (via build_caption_overlay_png) are pre-wrapped PNGs composited
-    with ffmpeg's overlay filter — not raw drawtext — so long captions wrap
-    onto multiple lines instead of overflowing past the frame edges.
+
+def get_audio_duration_seconds(path):
+    """Reads a media file's duration (seconds, float) via ffprobe."""
+    res = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True, check=True,
+    )
+    return float(res.stdout.strip())
+
+
+def split_script_into_captions(script_text, n_parts):
+    """
+    Splits the voiceover script into n_parts caption chunks, breaking on
+    sentence boundaries (not mid-sentence) so each on-screen caption reads
+    as a complete thought. Falls back to even word-count chunks if there
+    aren't enough sentences to fill n_parts groups.
+    """
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", script_text.strip()) if s.strip()]
+    if len(sentences) >= n_parts:
+        groups = [[] for _ in range(n_parts)]
+        for i, sentence in enumerate(sentences):
+            idx = min(i * n_parts // len(sentences), n_parts - 1)
+            groups[idx].append(sentence)
+        return [" ".join(g).strip() or sentences[min(i, len(sentences) - 1)] for i, g in enumerate(groups)]
+    else:
+        words = script_text.split()
+        per = max(1, len(words) // n_parts)
+        chunks = [" ".join(words[i:i + per]) for i in range(0, len(words), per)]
+        while len(chunks) < n_parts:
+            chunks.append(chunks[-1] if chunks else script_text)
+        return chunks[:n_parts]
+
+
+def build_reel_video(image_specs, audio_path, work_dir):
+    """
+    Builds a vertical (1080x1920) MP4 from real project images (hero +
+    section photos + a closing CTA card), each with a slow Ken Burns
+    zoom, a synced on-screen caption, and short fade in/out transitions —
+    narrated by an AI voiceover (see synthesize_voiceover) instead of
+    being silent.
+
+    `image_specs` is a list of dicts:
+      {"bytes": <image bytes>, "caption": str or None, "duration": seconds}
+    Durations should already sum to ~the voiceover's length (the caller
+    computes this from get_audio_duration_seconds + word-weighted splits).
 
     Used for Instagram Reels, Facebook video, and Pinterest video pins —
     same file, three destinations. Returns the final MP4 bytes. Raises on
     any ffmpeg failure (caller decides the fallback).
     """
     os.makedirs(work_dir, exist_ok=True)
+    fps = 30
     segment_paths = []
-    base_vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30"
 
-    for i, slide in enumerate(slides):
+    for i, spec in enumerate(image_specs):
+        img_path = os.path.join(work_dir, f"img_{i}.png")
+        with open(img_path, "wb") as f:
+            f.write(spec["bytes"])
+
+        duration = max(0.8, spec["duration"])
+        frames = max(1, int(round(duration * fps)))
+        fade_dur = min(0.3, duration / 4)
+
+        zoom_vf = (
+            f"scale=3240:5760,"
+            f"zoompan=z='min(zoom+0.0012,1.15)':d={frames}:"
+            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps={fps},"
+            f"fade=t=in:st=0:d={fade_dur},fade=t=out:st={max(0, duration - fade_dur)}:d={fade_dur}"
+        )
+
         seg_path = os.path.join(work_dir, f"seg_{i}.mp4")
         caption_png_path = None
-        if slide.get("caption"):
+        if spec.get("caption"):
             caption_png_path = os.path.join(work_dir, f"caption_{i}.png")
             with open(caption_png_path, "wb") as f:
-                f.write(build_caption_overlay_png(slide["caption"]))
+                f.write(build_caption_overlay_png(spec["caption"]))
 
-        if slide["kind"] == "video":
-            raw_path = os.path.join(work_dir, f"raw_{i}.mp4")
-            with open(raw_path, "wb") as f:
-                f.write(slide["bytes"])
-            if caption_png_path:
-                cmd = [
-                    "ffmpeg", "-y", "-i", raw_path, "-i", caption_png_path,
-                    "-t", str(slide["duration"]),
-                    "-filter_complex",
-                    f"[0:v]{base_vf}[bg];[bg][1:v]overlay=0:H*0.08[out]",
-                    "-map", "[out]", "-an",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
-                ]
-            else:
-                cmd = [
-                    "ffmpeg", "-y", "-i", raw_path, "-t", str(slide["duration"]),
-                    "-vf", base_vf, "-an",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
-                ]
-        else:  # static image card (e.g. the CTA card)
-            img_path = os.path.join(work_dir, f"img_{i}.png")
-            with open(img_path, "wb") as f:
-                f.write(slide["bytes"])
-            if caption_png_path:
-                cmd = [
-                    "ffmpeg", "-y", "-loop", "1", "-i", img_path,
-                    "-i", caption_png_path, "-t", str(slide["duration"]),
-                    "-filter_complex",
-                    f"[0:v]scale=1080:1920[bg];[bg][1:v]overlay=0:H*0.08[out]",
-                    "-map", "[out]", "-an",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
-                ]
-            else:
-                cmd = [
-                    "ffmpeg", "-y", "-loop", "1", "-i", img_path, "-t", str(slide["duration"]),
-                    "-vf", "scale=1080:1920,fps=30", "-an",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
-                ]
+        if caption_png_path:
+            cmd = [
+                "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+                "-i", caption_png_path, "-t", str(duration),
+                "-filter_complex",
+                f"[0:v]{zoom_vf}[bg];[bg][1:v]overlay=0:H*0.08[out]",
+                "-map", "[out]", "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y", "-loop", "1", "-i", img_path, "-t", str(duration),
+                "-vf", zoom_vf, "-an",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
+            ]
         subprocess.run(cmd, check=True, capture_output=True)
         segment_paths.append(seg_path)
 
-    # Concatenate all segments, and add a silent audio track — Instagram
-    # Reels / Facebook expect an audio stream present even if it's silent.
     concat_list_path = os.path.join(work_dir, "concat.txt")
     with open(concat_list_path, "w") as f:
         for p in segment_paths:
             f.write(f"file '{os.path.abspath(p)}'\n")
 
+    silent_video_path = os.path.join(work_dir, "silent.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
+         "-c:v", "libx264", "-preset", "fast", "-crf", "23", silent_video_path],
+        check=True, capture_output=True,
+    )
+
     final_path = os.path.join(work_dir, "final.mp4")
     subprocess.run(
         ["ffmpeg", "-y",
-         "-f", "concat", "-safe", "0", "-i", concat_list_path,
-         "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-         "-shortest",
-         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+         "-i", silent_video_path, "-i", audio_path,
+         "-map", "0:v", "-map", "1:a",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+         "-shortest", "-movflags", "+faststart",
          final_path],
         check=True, capture_output=True,
     )
 
     with open(final_path, "rb") as f:
         return f.read()
+
 
 
 def crop_to_ratio(img, target_ratio=2 / 3):
@@ -1879,49 +1940,61 @@ def main():
         reel_video_filepath = None
         pin_cover_filepath = None
         if RUN_TYPE == "video":
-            # --- Video-mode: build a real video that follows the article —
-            # one process clip per section (same queries used for the
-            # article's own section photos, so the footage matches what's
-            # actually written about), then a final "result" clip using the
-            # hero's own query (the finished-look shot), then the CTA card.
-            # Clips are generic topic-matching stock b-roll — same honesty
-            # scope as the stock photos used everywhere else in this script
-            # — not real footage of this specific fictional project.
-            print("Video-mode run: fetching Pexels process + result video clips...")
-            process_queries = [q for _, q in section_urls.values()] or [draft["image_prompt"]]
+            # --- Video-mode: build a narrated vertical video using the
+            # SAME real images already generated for the article (hero +
+            # section photos + the CTA card) — not generic mismatched stock
+            # video clips — each with a slow Ken Burns zoom, synced
+            # on-screen captions, and an AI voiceover (Edge-TTS, free)
+            # reading Gemini's short reel_script. This matches what the
+            # article is actually about and gives the reel real audio
+            # instead of being silent.
+            print("Video-mode run: synthesizing voiceover...")
+            reel_script = draft["reel_script"]
+            work_dir = os.path.join("images", f"reel-work-{ts}")
+            os.makedirs(work_dir, exist_ok=True)
+            audio_path = os.path.join(work_dir, "voiceover.mp3")
+            synthesize_voiceover(reel_script, audio_path)
+            audio_duration = get_audio_duration_seconds(audio_path)
+            print(f"Voiceover ready: {audio_duration:.1f}s")
 
-            slides = []
-            for q in process_queries:
+            # Split the script into sentences; the last sentence is always
+            # the "Full tutorial — link in bio!" CTA line (per the prompt),
+            # so it's pinned to the closing CTA card rather than left to
+            # chance in a generic even split.
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", reel_script.strip()) if s.strip()]
+            cta_line = sentences[-1] if sentences else "Full tutorial — link in bio!"
+            content_sentences = sentences[:-1] or sentences
+
+            # Real images, in article order: hero, then each section photo.
+            real_image_bytes = [raw_hero]
+            for _, (url, _query) in section_urls.items():
                 try:
-                    clip_bytes = search_pexels_video(q)
-                    slides.append({"kind": "video", "bytes": clip_bytes, "caption": q.title(), "duration": 4})
+                    real_image_bytes.append(requests.get(url, timeout=20).content)
                 except Exception as e:
-                    print(f"Pexels video search failed for '{q}': {e}")
+                    print(f"Couldn't fetch section image for video, skipping: {e}")
 
-            # The opening clip carries the curiosity hook instead of a plain
-            # step caption — same hook line used everywhere else.
-            if slides:
-                slides[0]["caption"] = pin_hook
+            n_content_slides = len(real_image_bytes)
+            content_captions = split_script_into_captions(
+                " ".join(content_sentences), n_content_slides
+            )
 
-            try:
-                result_bytes = search_pexels_video(draft["image_prompt"])
-                slides.append({"kind": "video", "bytes": result_bytes, "caption": "The Result", "duration": 4})
-            except Exception as e:
-                print(f"Pexels result-clip search failed: {e}")
+            image_specs = [
+                {"bytes": b, "caption": c, "duration": 1}  # duration set below
+                for b, c in zip(real_image_bytes, content_captions)
+            ]
+            image_specs.append({"bytes": ig_cta_compressed, "caption": cta_line, "duration": 1})
 
-            if not slides:
-                # Last resort so a run never fails purely because every
-                # specific search came back empty.
-                slides.append({
-                    "kind": "video", "bytes": search_pexels_video("home decor"),
-                    "caption": pin_hook, "duration": 4,
-                })
+            # Word-weighted duration so a longer caption gets more screen
+            # time than a short one, proportioned to the voiceover's total
+            # length — with a floor so no slide flashes by unreadably fast.
+            word_counts = [max(1, len(spec["caption"].split())) for spec in image_specs]
+            total_words = sum(word_counts)
+            for spec, wc in zip(image_specs, word_counts):
+                spec["duration"] = max(1.5, audio_duration * (wc / total_words))
 
-            slides.append({"kind": "image", "bytes": ig_cta_compressed, "caption": None, "duration": 3})
-
-            print(f"Building video from {len(slides)} slide(s)...")
+            print(f"Building video from {len(image_specs)} real-image slide(s)...")
             reel_video_bytes = build_reel_video(
-                slides, work_dir=os.path.join("images", f"reel-work-{ts}")
+                image_specs, audio_path, work_dir=work_dir
             )
             reel_video_filename = f"decor-{ts}-reel.mp4"
             reel_video_filepath = os.path.join("images", reel_video_filename)
