@@ -1408,12 +1408,16 @@ def post_to_facebook_page(message, image_url, link):
         return False
 
 
-def post_to_tumblr(caption, image_url, link):
+def post_to_tumblr(title, intro, total_cost, time_estimate, difficulty,
+                    image_url, link, hashtags):
     """
-    Posts a native photo post to the Tumblr blog via Tumblr's official
-    OAuth 1.0a API (Neue Post Format), with the blog link attached as a
-    clickable link block. Never raises — if this fails or isn't
-    configured, the post is still published everywhere else fine.
+    Posts a richly-formatted native post to the Tumblr blog via Tumblr's
+    official OAuth 1.0a API, using proper Neue Post Format blocks (heading,
+    paragraph, a bulleted "Quick Take" checklist, a styled link block, and
+    hashtags) instead of one flat text blob — matches how well-performing
+    decor/DIY Tumblr accounts structure their posts.
+    Never raises — if this fails or isn't configured, the post is still
+    published everywhere else fine.
     """
     if not all([TUMBLR_CONSUMER_KEY, TUMBLR_CONSUMER_SECRET,
                 TUMBLR_ACCESS_TOKEN, TUMBLR_ACCESS_TOKEN_SECRET, TUMBLR_BLOG_NAME]):
@@ -1427,16 +1431,21 @@ def post_to_tumblr(caption, image_url, link):
             resource_owner_key=TUMBLR_ACCESS_TOKEN,
             resource_owner_secret=TUMBLR_ACCESS_TOKEN_SECRET,
         )
+        content = [
+            {"type": "image", "media": [{"url": image_url}]},
+            {"type": "text", "text": f"✨ {title} ✨", "subtype": "heading1"},
+            {"type": "text", "text": intro},
+            {"type": "text", "text": "Quick Take:", "subtype": "heading2"},
+            {"type": "text", "text": f"💰 Cost: {total_cost}", "subtype": "bulleted-list-item"},
+            {"type": "text", "text": f"⏱️ Time: {time_estimate}", "subtype": "bulleted-list-item"},
+            {"type": "text", "text": f"📊 Difficulty: {difficulty}", "subtype": "bulleted-list-item"},
+            {"type": "link", "url": link, "display_url": link,
+             "title": "Read the Full Post on DecorVibe"},
+            {"type": "text", "text": hashtags},
+        ]
         res = oauth.post(
             f"https://api.tumblr.com/v2/blog/{TUMBLR_BLOG_NAME}/posts",
-            json={
-                "content": [
-                    {"type": "image", "media": [{"url": image_url}]},
-                    {"type": "text", "text": caption},
-                    {"type": "link", "url": link, "display_url": link,
-                     "title": "Read the full post"},
-                ],
-            },
+            json={"content": content},
             timeout=30,
         )
         if res.ok:
@@ -2208,8 +2217,16 @@ def main():
         print(f"Pinterest post failed (blog post is still published fine): {e}")
 
     print("Posting to Tumblr...")
-    tumblr_caption = f"{draft['title']}\n\n{social_description}\n\n{social_hashtags}"
-    tumblr_ok = post_to_tumblr(tumblr_caption, hero_url, post_url)
+    tumblr_ok = post_to_tumblr(
+        title=draft["title"],
+        intro=social_description,
+        total_cost=draft["total_cost"],
+        time_estimate=draft["time_estimate"],
+        difficulty=draft["difficulty"],
+        image_url=hero_url,
+        link=post_url,
+        hashtags=social_hashtags,
+    )
 
     save_status(
         blogger_ok=True, blogger_url=post_url,
