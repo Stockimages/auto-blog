@@ -4,3 +4,4 @@ google-auth
 pynacl
 boto3
 requests-oauthlib
+edge-tts
