@@ -660,7 +660,7 @@ def normalize_draft(draft):
     return draft
 
 
-def search_pexels_image(query, orientation="portrait", used_photo_ids=None):
+def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None):
     """
     Finds a Pexels photo matching `query`. If `used_photo_ids` is given,
     photos we've already used in previous posts are skipped — two posts
@@ -668,6 +668,17 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None):
     which looks like duplicate spam on Pinterest in particular. Falls back
     to the full result set if every match has already been used, so a run
     never fails just because a query's results are exhausted.
+
+    `orientation="portrait"` only guarantees height > width — Pexels still
+    returns a mix of actual ratios within that (a near-square 4:5 photo
+    and a tall 1:2 photo both count as "portrait"). For the reel video,
+    which needs to fill an exact 9:16 frame, a photo whose real ratio is
+    far from that needs a much more aggressive cover-crop to fill the
+    frame, which is what was making some slides look oddly tight/zoomed-in
+    compared to the hero shot. Passing `target_ratio` (width/height, e.g.
+    9/16) makes this prefer candidates reasonably close to that ratio
+    instead of picking any portrait photo at random.
+
     Returns (image_bytes, photo_id) so the caller can record the ID.
     """
     used_photo_ids = used_photo_ids or set()
@@ -698,7 +709,30 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None):
     unused = [p for p in photos if p["id"] not in used_photo_ids]
     if not unused:
         print(f"All Pexels results for '{query}' were already used — reusing one anyway.")
-    photo = random.choice(unused or photos)
+    candidates = unused or photos
+
+    if target_ratio:
+        # Prefer photos within ~35% of the target ratio (e.g. 9:16 for the
+        # reel) so the later cover-crop only trims a normal amount instead
+        # of zooming into a thin sliver of an oddly-shaped source photo.
+        # Falls back to the single closest-ratio photo if nothing is close
+        # enough, rather than failing the whole run over it.
+        close_enough = [
+            p for p in candidates
+            if p.get("width") and p.get("height")
+            and abs((p["width"] / p["height"]) - target_ratio) / target_ratio < 0.35
+        ]
+        if close_enough:
+            photo = random.choice(close_enough)
+        elif any(p.get("width") and p.get("height") for p in candidates):
+            photo = min(
+                (p for p in candidates if p.get("width") and p.get("height")),
+                key=lambda p: abs((p["width"] / p["height"]) - target_ratio),
+            )
+        else:
+            photo = random.choice(candidates)
+    else:
+        photo = random.choice(candidates)
 
     image_url = photo["src"]["large2x"]
     image_res = robust_request("GET", image_url, timeout=30)
@@ -879,7 +913,7 @@ def build_watermark_overlay_png(brand_text="DecorVibe", canvas_size=(1080, 1920)
 
 
 
-REEL_VOICES = ["en-US-AndrewMultilingualNeural", "en-US-BrianMultilingualNeural", "en-US-GuyNeural"]
+REEL_VOICES = ["en-US-AvaMultilingualNeural", "en-US-EmmaMultilingualNeural", "en-US-JennyNeural"]
 
 # Rotates randomly per video (see the video-mode block in main()) instead
 # of always using the same line, so posts don't feel repetitive over time.
@@ -909,12 +943,13 @@ def pick_background_music():
 def synthesize_voiceover(script_text, out_path, voice=None):
     """
     Converts the reel script to speech via Microsoft Edge-TTS (free,
-    unlimited, no API key). Randomly picks one of a few natural American
-    voices (REEL_VOICES) when none is specified — the newer
-    "MultilingualNeural" voices (Andrew, Brian) sound noticeably less
-    robotic/more expressive than the older classic Neural voices, so
-    those are favored, with GuyNeural (also one of the more natural
-    classic voices) as a third option for variety.
+    unlimited, no API key). Randomly picks one of a few natural female
+    American voices (REEL_VOICES) when none is specified — this niche's
+    audience skews heavily female, and a female voice fits it better than
+    a male one. The newer "MultilingualNeural" voices (Ava, Emma) sound
+    noticeably less robotic/more expressive than the older classic Neural
+    voices, so those are favored, with JennyNeural (also one of the more
+    natural classic voices) as a third option for variety.
 
     Also nudges the delivery to sound less flat/robotic: slightly slower
     than default (-4%, reads as more deliberate/natural for how-to content
@@ -1013,7 +1048,17 @@ def build_reel_video(image_specs, audio_path, work_dir):
         target_zoom = 1.15
         zoom_rate = (target_zoom - 1.0) / frames
         zoom_vf = (
-            f"scale=3240:5760,"
+            # Real photos rarely come in exactly the 9:16 (0.5625) ratio
+            # this video needs — a suitcase photo above was 2:3 (0.667),
+            # for example. Forcing "scale=W:H" to an exact target size
+            # ignores the source's own ratio and stretches/squishes it.
+            # "force_original_aspect_ratio=increase" instead scales up
+            # UNIFORMLY until the image at least covers the 9:16 box, then
+            # "crop" trims the overflow to the exact box — same idea as
+            # object-fit: cover in CSS. No distortion, whatever the
+            # source photo's original shape was.
+            f"scale=3240:5760:force_original_aspect_ratio=increase,"
+            f"crop=3240:5760,"
             f"zoompan=z='min(zoom+{zoom_rate:.8f},{target_zoom})':d={frames}:"
             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps={fps},"
             f"fade=t=in:st=0:d={fade_dur},fade=t=out:st={max(0, duration - fade_dur)}:d={fade_dur}"
@@ -2187,7 +2232,8 @@ def main():
                 qi += 1
                 try:
                     raw_bytes, photo_id = search_pexels_image(
-                        query, orientation="portrait", used_photo_ids=used_photo_ids
+                        query, orientation="portrait", used_photo_ids=used_photo_ids,
+                        target_ratio=9 / 16,
                     )
                     real_image_bytes.append(raw_bytes)
                     this_run_photo_ids.append(photo_id)
