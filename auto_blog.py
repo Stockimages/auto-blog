@@ -1516,6 +1516,7 @@ def post_to_tumblr(title, intro, total_cost, time_estimate, difficulty,
     except Exception as e:
         print(f"Tumblr post failed (blog post is still published fine): {e}")
         return False
+def post_facebook_video(description, video_url):
     """
     Posts a native video to the Facebook Page (used only for RUN_TYPE=video
     runs) — this is a plain video post, NOT the clickable link-card that
