@@ -447,9 +447,13 @@ Also write:
   vertical video (Instagram Reel / TikTok), 55-75 words total, written to be
   read aloud by an AI voice — NOT the article text. Structure:
   1. A punchy 1-sentence hook (curiosity or the transformation/price angle).
-  2. 2-3 short, concrete tip/step sentences pulled from the real project.
-  3. End with EXACTLY this call-to-action sentence, verbatim: "Full tutorial —
-     link in bio!"
+  2. 2-3 short, concrete tip/step sentences pulled from the real project. In
+     ONE of these sentences, naturally mention the total cost and time using
+     the actual numbers (e.g. "It only took about an hour and cost me $20.")
+     — write dollar amounts as "$20" (not spelled out), the TTS voice reads
+     these correctly, and it lets the on-screen caption highlight the price.
+  3. End with EXACTLY this call-to-action sentence, verbatim: "Full
+     step-by-step guide — visit our website!"
   Write it like natural spoken American English: short sentences,
   contractions, no filler, no markdown, no quotation marks inside the string.
 
@@ -588,10 +592,12 @@ def normalize_draft(draft):
 
     if not draft.get("reel_script") or not isinstance(draft.get("reel_script"), str):
         warn("reel_script", "a generated fallback built from the title/pin_hook")
+        cost_line = f"It only cost {draft.get('total_cost', 'a few dollars')}. " if draft.get("total_cost") else ""
         draft["reel_script"] = (
             f"{draft.get('pin_hook', draft['title'])}. "
             f"Here's how to get the look for way less. "
-            f"Full tutorial — link in bio!"
+            f"{cost_line}"
+            f"Full step-by-step guide — visit our website!"
         )
 
     if not isinstance(draft.get("section_images"), list):
@@ -762,44 +768,129 @@ def search_pexels_video(query, orientation="portrait", min_duration=3, max_durat
     return video_res.content
 
 
-def build_caption_overlay_png(text, width=1080, position="top"):
+def build_caption_overlay_png(text, width=1080, position="top", is_cta=False):
     """
-    Renders any caption as a transparent PNG with proper word-wrapping and
-    a semi-transparent background bar sized to fit the text — used for the
-    hook line, step captions, and the "before it's a decor piece" tag on
-    process clips. Wrapping (via textwrap, same as build_text_card) is
-    what prevents the text from overflowing past the frame edges, which a
-    raw unwrapped ffmpeg drawtext string used to do.
-    """
-    font = _load_bold_font(50 if position == "top" else 44)
-    dummy_img = Image.new("RGBA", (width, 10), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(dummy_img)
-    wrapped = textwrap.fill(text.upper() if position == "top" else text, width=26)
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
-    text_h = bbox[3] - bbox[1]
+    Renders a caption as a transparent PNG with word-wrapping, drawn word
+    by word (not PIL's built-in multiline_text) so dollar amounts like
+    "$20" can be highlighted in gold while the rest of the line stays
+    white — the price/transformation number is this niche's biggest
+    scroll-stopper, so it needs to visually pop, not blend in.
 
-    pad_v = 26
+    is_cta=True renders the closing "visit our website" slide with a
+    bigger font and a solid accent background bar instead of the usual
+    semi-transparent one, so it reads as a clear call-to-action rather
+    than just another step caption.
+
+    Vertical position is nudged down from the very top edge (rather than
+    flush against it) to stay clear of Instagram/TikTok's own UI chrome
+    (status area, sound name) — the "safe zone" for on-screen text.
+    """
+    price_re = re.compile(r"\$[\d,]+(?:\.\d+)?")
+    display_text = text.upper() if (position == "top" and not is_cta) else text
+
+    font_size = 58 if is_cta else (50 if position == "top" else 44)
+    font = _load_bold_font(font_size)
+    accent_color = (255, 205, 60, 255)   # gold — for price highlights
+    text_color = (20, 20, 20, 255) if is_cta else (255, 255, 255, 255)
+    bg_color = (255, 205, 60, 235) if is_cta else (0, 0, 0, 150)
+
+    dummy_img = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(dummy_img)
+    space_w = draw.textlength(" ", font=font)
+
+    # Manual word-wrap so we can track each word's color individually.
+    max_line_width = width - 100
+    words = display_text.split()
+    lines, current_line, current_w = [], [], 0
+    for word in words:
+        w = draw.textlength(word, font=font)
+        if current_line and current_w + space_w + w > max_line_width:
+            lines.append(current_line)
+            current_line, current_w = [], 0
+        current_line.append(word)
+        current_w += (space_w if len(current_line) > 1 else 0) + w
+    if current_line:
+        lines.append(current_line)
+
+    ascent, descent = font.getmetrics()
+    line_h = ascent + descent
+    spacing = 10
+    text_h = len(lines) * line_h + (len(lines) - 1) * spacing
+    pad_v = 30 if is_cta else 26
     bar_h = text_h + pad_v * 2
+
     img = Image.new("RGBA", (width, bar_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rectangle([(0, 0), (width, bar_h)], fill=(0, 0, 0, 150))
-    text_w = bbox[2] - bbox[0]
-    x = (width - text_w) / 2 - bbox[0]
-    draw.multiline_text((x, pad_v - bbox[1]), wrapped, font=font, fill="white",
-                         align="center", spacing=10)
+    draw.rectangle([(0, 0), (width, bar_h)], fill=bg_color)
+
+    y = pad_v
+    for line in lines:
+        line_w = sum(draw.textlength(w, font=font) for w in line) + space_w * (len(line) - 1)
+        x = (width - line_w) / 2
+        for word in line:
+            color = accent_color if (price_re.fullmatch(word.strip(".,!?")) and not is_cta) else text_color
+            draw.text((x, y), word, font=font, fill=color)
+            x += draw.textlength(word, font=font) + space_w
+        y += line_h + spacing
 
     out = BytesIO()
     img.save(out, format="PNG")
     return out.getvalue()
 
 
-def synthesize_voiceover(script_text, out_path, voice="en-US-ChristopherNeural"):
+def build_watermark_overlay_png(brand_text="DecorVibe", canvas_size=(1080, 1920)):
+    """
+    Small, permanent, semi-transparent brand watermark composited onto
+    every frame of the reel — placed top-right, away from Instagram/
+    TikTok's own bottom UI chrome (caption/username/audio strip) and away
+    from the main caption text (top-center), so it never collides with
+    either. Travels with the video if it's ever reposted or screen-
+    recorded without credit.
+    """
+    font = _load_bold_font(30)
+    img = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    text = brand_text
+    text_w = draw.textlength(text, font=font)
+    margin = 36
+    x = canvas_size[0] - text_w - margin
+    y = margin
+    # Faint shadow for legibility over any background, then the text itself.
+    draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 110))
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, 170))
+    out = BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
+
+
+
+REEL_VOICES = ["en-US-ChristopherNeural", "en-US-EricNeural", "en-US-GuyNeural"]
+MUSIC_DIR = "music"  # optional: drop royalty-free .mp3 tracks here to enable background music
+
+
+def pick_background_music():
+    """
+    Returns a random .mp3 path from MUSIC_DIR, or None if the folder
+    doesn't exist or is empty — background music is optional polish, so a
+    missing folder should never break a run, just fall back to
+    voice-only (which is exactly today's behavior until music is added).
+    """
+    if not os.path.isdir(MUSIC_DIR):
+        return None
+    tracks = [os.path.join(MUSIC_DIR, f) for f in os.listdir(MUSIC_DIR) if f.lower().endswith(".mp3")]
+    return random.choice(tracks) if tracks else None
+
+
+def synthesize_voiceover(script_text, out_path, voice=None):
     """
     Converts the reel script to speech via Microsoft Edge-TTS (free,
-    unlimited, no API key). en-US-ChristopherNeural is a deep, natural
-    American voice that reads well for short-form motivational/how-to
-    content. Writes an mp3 to out_path.
+    unlimited, no API key). Randomly picks one of a few natural American
+    male voices (REEL_VOICES) when none is specified, so posts don't all
+    sound identical over weeks of runs. Writes an mp3 to out_path.
     """
+    voice = voice or random.choice(REEL_VOICES)
+    print(f"Using voice: {voice}")
+
     async def _run():
         communicate = edge_tts.Communicate(script_text, voice)
         await communicate.save(out_path)
@@ -861,6 +952,10 @@ def build_reel_video(image_specs, audio_path, work_dir):
     fps = 30
     segment_paths = []
 
+    watermark_path = os.path.join(work_dir, "watermark.png")
+    with open(watermark_path, "wb") as f:
+        f.write(build_watermark_overlay_png())
+
     for i, spec in enumerate(image_specs):
         img_path = os.path.join(work_dir, f"img_{i}.png")
         with open(img_path, "wb") as f:
@@ -869,6 +964,7 @@ def build_reel_video(image_specs, audio_path, work_dir):
         duration = max(0.8, spec["duration"])
         frames = max(1, int(round(duration * fps)))
         fade_dur = min(0.3, duration / 4)
+        is_cta = bool(spec.get("is_cta"))
 
         zoom_vf = (
             f"scale=3240:5760,"
@@ -882,21 +978,34 @@ def build_reel_video(image_specs, audio_path, work_dir):
         if spec.get("caption"):
             caption_png_path = os.path.join(work_dir, f"caption_{i}.png")
             with open(caption_png_path, "wb") as f:
-                f.write(build_caption_overlay_png(spec["caption"]))
+                f.write(build_caption_overlay_png(spec["caption"], is_cta=is_cta))
+
+        # Safe-zone caption position: nudged below the very top edge for
+        # normal step captions; the closing CTA card gets its (bigger,
+        # bolder) caption centered vertically so it reads as a clear final
+        # call-to-action rather than just another step. Either way it
+        # stays clear of Instagram/TikTok's own bottom UI chrome
+        # (caption/username/audio strip), which is the part most likely to
+        # cover on-screen text if it's placed too low.
+        caption_y = "H*0.42" if is_cta else "H*0.12"
 
         if caption_png_path:
             cmd = [
                 "ffmpeg", "-y", "-loop", "1", "-i", img_path,
-                "-i", caption_png_path, "-t", str(duration),
+                "-i", caption_png_path, "-i", watermark_path, "-t", str(duration),
                 "-filter_complex",
-                f"[0:v]{zoom_vf}[bg];[bg][1:v]overlay=0:H*0.08[out]",
+                f"[0:v]{zoom_vf}[bg];"
+                f"[bg][1:v]overlay=0:{caption_y}[bg2];"
+                f"[bg2][2:v]overlay=0:0[out]",
                 "-map", "[out]", "-an",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
             ]
         else:
             cmd = [
-                "ffmpeg", "-y", "-loop", "1", "-i", img_path, "-t", str(duration),
-                "-vf", zoom_vf, "-an",
+                "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+                "-i", watermark_path, "-t", str(duration),
+                "-filter_complex", f"[0:v]{zoom_vf}[bg];[bg][1:v]overlay=0:0[out]",
+                "-map", "[out]", "-an",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
             ]
         subprocess.run(cmd, check=True, capture_output=True)
@@ -915,15 +1024,36 @@ def build_reel_video(image_specs, audio_path, work_dir):
     )
 
     final_path = os.path.join(work_dir, "final.mp4")
-    subprocess.run(
-        ["ffmpeg", "-y",
-         "-i", silent_video_path, "-i", audio_path,
-         "-map", "0:v", "-map", "1:a",
-         "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-         "-shortest", "-movflags", "+faststart",
-         final_path],
-        check=True, capture_output=True,
-    )
+    music_path = pick_background_music()
+
+    if music_path:
+        # Loop the track to at least cover the voiceover's length, then mix
+        # it in well below the voice (0.12x) so it's felt as ambience, not
+        # heard as competing audio — the voice must always stay the clear,
+        # dominant track since it carries the actual information.
+        print(f"Mixing in background music: {os.path.basename(music_path)}")
+        subprocess.run(
+            ["ffmpeg", "-y",
+             "-i", silent_video_path, "-i", audio_path,
+             "-stream_loop", "-1", "-i", music_path,
+             "-filter_complex",
+             "[2:a]volume=0.12[music];[1:a][music]amix=inputs=2:duration=first:dropout_transition=0[mixed]",
+             "-map", "0:v", "-map", "[mixed]",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+             "-shortest", "-movflags", "+faststart",
+             final_path],
+            check=True, capture_output=True,
+        )
+    else:
+        subprocess.run(
+            ["ffmpeg", "-y",
+             "-i", silent_video_path, "-i", audio_path,
+             "-map", "0:v", "-map", "1:a",
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+             "-shortest", "-movflags", "+faststart",
+             final_path],
+            check=True, capture_output=True,
+        )
 
     with open(final_path, "rb") as f:
         return f.read()
@@ -1957,11 +2087,11 @@ def main():
             print(f"Voiceover ready: {audio_duration:.1f}s")
 
             # Split the script into sentences; the last sentence is always
-            # the "Full tutorial — link in bio!" CTA line (per the prompt),
-            # so it's pinned to the closing CTA card rather than left to
-            # chance in a generic even split.
+            # the "Full step-by-step guide — visit our website!" CTA line
+            # (per the prompt), so it's pinned to the closing CTA card
+            # rather than left to chance in a generic even split.
             sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", reel_script.strip()) if s.strip()]
-            cta_line = sentences[-1] if sentences else "Full tutorial — link in bio!"
+            cta_line = sentences[-1] if sentences else "Full step-by-step guide — visit our website!"
             content_sentences = sentences[:-1] or sentences
 
             # Real images, in article order: hero, then each section photo.
@@ -1981,7 +2111,7 @@ def main():
                 {"bytes": b, "caption": c, "duration": 1}  # duration set below
                 for b, c in zip(real_image_bytes, content_captions)
             ]
-            image_specs.append({"bytes": ig_cta_compressed, "caption": cta_line, "duration": 1})
+            image_specs.append({"bytes": ig_cta_compressed, "caption": cta_line, "duration": 1, "is_cta": True})
 
             # Word-weighted duration so a longer caption gets more screen
             # time than a short one, proportioned to the voiceover's total
