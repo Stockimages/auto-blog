@@ -443,19 +443,28 @@ Also write:
   "token" (e.g. "IMG_1") and a "query" (3-5 keyword search terms for a real,
   horizontal photo matching that section of the article — no people's faces,
   no text).
-- "reel_script": a short spoken-word voiceover script for a ~20-25 second
-  vertical video (Instagram Reel / TikTok), 55-75 words total, written to be
-  read aloud by an AI voice — NOT the article text. Structure:
-  1. A punchy 1-sentence hook (curiosity or the transformation/price angle).
-  2. 2-3 short, concrete tip/step sentences pulled from the real project. In
-     ONE of these sentences, naturally mention the total cost and time using
-     the actual numbers (e.g. "It only took about an hour and cost me $20.")
-     — write dollar amounts as "$20" (not spelled out), the TTS voice reads
-     these correctly, and it lets the on-screen caption highlight the price.
-  3. End with EXACTLY this call-to-action sentence, verbatim: "Full
-     step-by-step guide — visit our website!"
-  Write it like natural spoken American English: short sentences,
-  contractions, no filler, no markdown, no quotation marks inside the string.
+- "reel_script": a short spoken-word voiceover script for a ~18-22 second
+  vertical video (Instagram Reel / TikTok), 45-65 words total, written to be
+  read aloud by an AI voice — NOT the article text, and do NOT include any
+  call-to-action or "link"/"website"/"bio" line (that's added separately).
+  Structure:
+  1. A punchy 1-sentence hook that would make someone stop scrolling — lean
+     hard into the price-transformation shock or a specific, concrete
+     curiosity gap (what it actually is, not "you won't believe this").
+     Specific and unexpected beats generic every time: "This $9 thrift-store
+     lazy Susan is now a $380 stone counter riser" beats "I made an amazing
+     upgrade for cheap."
+  2. 2 short, concrete tip/step sentences pulled from the real project — the
+     single most surprising or useful specific detail (the trick, the
+     material swap, the exact technique), not a generic summary. In ONE of
+     these, naturally mention the total cost and time using the actual
+     numbers (e.g. "It only took about an hour and cost me $20.") — write
+     dollar amounts as "$20" (not spelled out); the TTS voice reads these
+     correctly, and it lets the on-screen caption highlight the price.
+  Write it like natural spoken American English: short punchy sentences,
+  contractions, no filler, no markdown, no quotation marks inside the
+  string. Every sentence should earn its place — cut anything that doesn't
+  add curiosity or a concrete, specific detail.
 
 Return ONLY valid JSON. No markdown fences, no commentary before or after.
 {{
@@ -597,8 +606,7 @@ def normalize_draft(draft):
             f"{draft.get('pin_hook', draft['title'])}. "
             f"Here's how to get the look for way less. "
             f"{cost_line}"
-            f"Full step-by-step guide — visit our website!"
-        )
+        ).strip()
 
     if not isinstance(draft.get("section_images"), list):
         warn("section_images", "no section images")
@@ -865,6 +873,16 @@ def build_watermark_overlay_png(brand_text="DecorVibe", canvas_size=(1080, 1920)
 
 
 REEL_VOICES = ["en-US-ChristopherNeural", "en-US-EricNeural", "en-US-GuyNeural"]
+
+# Rotates randomly per video (see the video-mode block in main()) instead
+# of always using the same line, so posts don't feel repetitive over time.
+# Deliberately confident/direct rather than asking a favor ("please visit")
+# — matches how the rest of this niche's successful creators talk.
+REEL_CTA_LINES = [
+    "Want to try this on a budget too? Full guide's on our website.",
+    "If you want to recreate this for cheap, the full guide's on our website.",
+    "Want the budget version? Full guide's on our website.",
+]
 MUSIC_DIR = "music"  # optional: drop royalty-free .mp3 tracks here to enable background music
 
 
@@ -2078,7 +2096,8 @@ def main():
             # article is actually about and gives the reel real audio
             # instead of being silent.
             print("Video-mode run: synthesizing voiceover...")
-            reel_script = draft["reel_script"]
+            cta_line = random.choice(REEL_CTA_LINES)
+            reel_script = f"{draft['reel_script'].strip()} {cta_line}"
             work_dir = os.path.join("images", f"reel-work-{ts}")
             os.makedirs(work_dir, exist_ok=True)
             audio_path = os.path.join(work_dir, "voiceover.mp3")
@@ -2086,13 +2105,9 @@ def main():
             audio_duration = get_audio_duration_seconds(audio_path)
             print(f"Voiceover ready: {audio_duration:.1f}s")
 
-            # Split the script into sentences; the last sentence is always
-            # the "Full step-by-step guide — visit our website!" CTA line
-            # (per the prompt), so it's pinned to the closing CTA card
-            # rather than left to chance in a generic even split.
-            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", reel_script.strip()) if s.strip()]
-            cta_line = sentences[-1] if sentences else "Full step-by-step guide — visit our website!"
-            content_sentences = sentences[:-1] or sentences
+            # Everything except the CTA line (added above, and always the
+            # last sentence) becomes the content captions.
+            content_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", draft["reel_script"].strip()) if s.strip()]
 
             # Real images, in article order: hero, then each section photo.
             real_image_bytes = [raw_hero]
@@ -2111,7 +2126,13 @@ def main():
                 {"bytes": b, "caption": c, "duration": 1}  # duration set below
                 for b, c in zip(real_image_bytes, content_captions)
             ]
-            image_specs.append({"bytes": ig_cta_compressed, "caption": cta_line, "duration": 1, "is_cta": True})
+            # A blank branded background (no baked-in text) — NOT
+            # ig_cta_compressed, which already has "Want the full guide /
+            # link in our bio" text drawn into the image for the Instagram
+            # carousel. Reusing that here would double up with the CTA
+            # caption overlay below, showing two overlapping messages.
+            video_cta_bg = build_text_card([], size=(1080, 1920))
+            image_specs.append({"bytes": video_cta_bg, "caption": cta_line, "duration": 1, "is_cta": True})
 
             # Word-weighted duration so a longer caption gets more screen
             # time than a short one, proportioned to the voiceover's total
