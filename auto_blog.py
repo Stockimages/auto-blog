@@ -24,6 +24,7 @@ on a schedule, with no human interaction.
 
 import os
 import re
+import math
 import json
 import html
 import base64
@@ -436,13 +437,19 @@ Also write:
   written like Pinterest pin text (e.g. "10 Thrift Flips That Look Expensive"),
   NOT a full sentence, no ending punctuation.
 - "image_prompt": REQUIRED — 3-5 simple search keywords (not a sentence) for
-  the vertical HERO photo (this is the one shown on Pinterest) — e.g.
-  "thrifted glass vase living room". No brand names, no people's faces, no
-  text. This field must always be present in your JSON response.
+  the vertical HERO photo (this is the one shown on Pinterest AND the reel's
+  opening shot) — e.g. "thrifted glass vase living room". No brand names, no
+  people's faces, no text. Bias toward a STYLED, finished-look shot rather
+  than a plain product photo: add a styling word when it fits naturally
+  (e.g. "styled", "cozy", "rustic", "close-up", "warm light", "vignette") so
+  the search leans toward an aesthetic, magazine-style result instead of a
+  flat catalog photo — this is what makes someone stop and think "how did
+  they make that?" instead of scrolling past. This field must always be
+  present in your JSON response.
 - "section_images": a list matching your [[IMG_n]] placeholders, each with a
   "token" (e.g. "IMG_1") and a "query" (3-5 keyword search terms for a real,
-  horizontal photo matching that section of the article — no people's faces,
-  no text).
+  horizontal photo matching that section of the article, with the same
+  styled/aesthetic bias as image_prompt above — no people's faces, no text).
 - "reel_script": a short spoken-word voiceover script for a ~18-22 second
   vertical video (Instagram Reel / TikTok), 45-65 words total, written to be
   read aloud by an AI voice — NOT the article text, and do NOT include any
@@ -872,7 +879,7 @@ def build_watermark_overlay_png(brand_text="DecorVibe", canvas_size=(1080, 1920)
 
 
 
-REEL_VOICES = ["en-US-ChristopherNeural", "en-US-EricNeural", "en-US-GuyNeural"]
+REEL_VOICES = ["en-US-AndrewMultilingualNeural", "en-US-BrianMultilingualNeural", "en-US-GuyNeural"]
 
 # Rotates randomly per video (see the video-mode block in main()) instead
 # of always using the same line, so posts don't feel repetitive over time.
@@ -903,14 +910,26 @@ def synthesize_voiceover(script_text, out_path, voice=None):
     """
     Converts the reel script to speech via Microsoft Edge-TTS (free,
     unlimited, no API key). Randomly picks one of a few natural American
-    male voices (REEL_VOICES) when none is specified, so posts don't all
-    sound identical over weeks of runs. Writes an mp3 to out_path.
+    voices (REEL_VOICES) when none is specified — the newer
+    "MultilingualNeural" voices (Andrew, Brian) sound noticeably less
+    robotic/more expressive than the older classic Neural voices, so
+    those are favored, with GuyNeural (also one of the more natural
+    classic voices) as a third option for variety.
+
+    Also nudges the delivery to sound less flat/robotic: slightly slower
+    than default (-4%, reads as more deliberate/natural for how-to content
+    rather than rushed) and a small per-run random pitch offset (so
+    back-to-back videos using the same voice don't all sound identically
+    monotone). Writes an mp3 to out_path.
     """
     voice = voice or random.choice(REEL_VOICES)
-    print(f"Using voice: {voice}")
+    pitch_offset = random.randint(-15, 5)  # Hz
+    print(f"Using voice: {voice} (rate=-4%, pitch={pitch_offset:+d}Hz)")
 
     async def _run():
-        communicate = edge_tts.Communicate(script_text, voice)
+        communicate = edge_tts.Communicate(
+            script_text, voice, rate="-4%", pitch=f"{pitch_offset:+d}Hz"
+        )
         await communicate.save(out_path)
 
     asyncio.run(_run())
@@ -984,9 +1003,18 @@ def build_reel_video(image_specs, audio_path, work_dir):
         fade_dur = min(0.3, duration / 4)
         is_cta = bool(spec.get("is_cta"))
 
+        # Zoom rate is calculated PER SLIDE (target zoom reached, right at
+        # the slide's own last frame) rather than a fixed rate — a fixed
+        # rate reaches its zoom cap early on any longer slide and then
+        # visibly freezes/holds still for the remainder, which is exactly
+        # what looked "stuck" before. This keeps the pan/zoom continuously
+        # moving for the slide's entire on-screen duration, however long
+        # or short that slide happens to be.
+        target_zoom = 1.15
+        zoom_rate = (target_zoom - 1.0) / frames
         zoom_vf = (
             f"scale=3240:5760,"
-            f"zoompan=z='min(zoom+0.0012,1.15)':d={frames}:"
+            f"zoompan=z='min(zoom+{zoom_rate:.8f},{target_zoom})':d={frames}:"
             f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps={fps},"
             f"fade=t=in:st=0:d={fade_dur},fade=t=out:st={max(0, duration - fade_dur)}:d={fade_dur}"
         )
@@ -1664,13 +1692,15 @@ def post_to_tumblr(title, intro, total_cost, time_estimate, difficulty,
     except Exception as e:
         print(f"Tumblr post failed (blog post is still published fine): {e}")
         return False
-def post_facebook_video(description, video_url):
+def post_facebook_video(description, video_url, link):
     """
     Posts a native video to the Facebook Page (used only for RUN_TYPE=video
     runs) — this is a plain video post, NOT the clickable link-card that
     post_to_facebook_page() makes, so it's posted as an ADDITIONAL post
     alongside the usual link post rather than replacing it, to avoid losing
-    the click-through traffic the link card drives.
+    the click-through traffic the link card drives. Also adds the blog link
+    as a comment (same as the image-mode post), since a native video post's
+    description text isn't clickable either.
     Never raises — returns True/False for the dashboard.
     """
     if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
@@ -1686,12 +1716,30 @@ def post_facebook_video(description, video_url):
             },
             timeout=120,
         )
-        if res.ok:
-            print("Posted Facebook video:", res.json().get("id"))
-            return True
-        else:
+        if not res.ok:
             print(f"Facebook video post failed ({res.status_code}): {res.text}")
             return False
+
+        post_id = res.json().get("id")
+        print("Posted Facebook video:", post_id)
+
+        # Also add the link as a comment — wrapped separately so a comment
+        # failure doesn't undo the fact that the video post itself already
+        # succeeded.
+        try:
+            comment_res = robust_request(
+                "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                timeout=30,
+            )
+            if comment_res.ok:
+                print("Added link comment:", comment_res.json().get("id"))
+            else:
+                print(f"Facebook video link-comment failed ({comment_res.status_code}): {comment_res.text}")
+        except Exception as e:
+            print(f"Facebook video link-comment failed (video post still published fine): {e}")
+
+        return True
     except Exception as e:
         print(f"Facebook video post failed (blog post is still published fine): {e}")
         return False
@@ -2108,16 +2156,48 @@ def main():
             # Everything except the CTA line (added above, and always the
             # last sentence) becomes the content captions.
             content_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", draft["reel_script"].strip()) if s.strip()]
+            content_words = sum(len(s.split()) for s in content_sentences)
+            total_words_incl_cta = content_words + len(cta_line.split())
+            content_duration_est = audio_duration * (content_words / max(1, total_words_incl_cta))
 
-            # Real images, in article order: hero, then each section photo.
+            # Cap how long any single image can hold the screen — a longer
+            # caption used to mean a longer hold on one image, which (even
+            # with the zoom fixed above) still reads as "stuck" compared to
+            # a normal reel's pacing. Past this cap, use MORE images with
+            # shorter holds instead of stretching one out.
+            MAX_SLIDE_SECONDS = 3.5
+            n_content_slides = max(2, math.ceil(content_duration_est / MAX_SLIDE_SECONDS))
+
+            # Real, VERTICAL images only. The hero is already portrait
+            # (search_pexels_image defaults to orientation="portrait"). The
+            # article's own section photos are LANDSCAPE (they're made for
+            # the horizontal blog layout) — cropping those into a 9:16 reel
+            # frame was cutting them down into an oddly narrow, stretched-
+            # looking strip. So instead of reusing them here, do fresh
+            # portrait-orientation Pexels searches using the same topical
+            # queries (still on-topic for this specific post, and still
+            # whatever Gemini's own section_images queries described) —
+            # cycling through those queries again if more slides are
+            # needed than there are distinct queries.
             real_image_bytes = [raw_hero]
-            for _, (url, _query) in section_urls.items():
+            section_queries = [q for _, q in section_urls.values()] or [draft["image_prompt"]]
+            qi = 0
+            while len(real_image_bytes) < n_content_slides:
+                query = section_queries[qi % len(section_queries)]
+                qi += 1
                 try:
-                    real_image_bytes.append(requests.get(url, timeout=20).content)
+                    raw_bytes, photo_id = search_pexels_image(
+                        query, orientation="portrait", used_photo_ids=used_photo_ids
+                    )
+                    real_image_bytes.append(raw_bytes)
+                    this_run_photo_ids.append(photo_id)
+                    used_photo_ids.add(photo_id)
                 except Exception as e:
-                    print(f"Couldn't fetch section image for video, skipping: {e}")
+                    print(f"Couldn't fetch an extra portrait image for '{query}': {e}")
+                    if qi > len(section_queries) * 3:
+                        break  # give up rather than loop forever if Pexels keeps failing
 
-            n_content_slides = len(real_image_bytes)
+            n_content_slides = len(real_image_bytes)  # actual count, in case fetches came up short
             content_captions = split_script_into_captions(
                 " ".join(content_sentences), n_content_slides
             )
@@ -2136,11 +2216,22 @@ def main():
 
             # Word-weighted duration so a longer caption gets more screen
             # time than a short one, proportioned to the voiceover's total
-            # length — with a floor so no slide flashes by unreadably fast.
+            # length — with a floor so no slide flashes by unreadably fast,
+            # and the MAX_SLIDE_SECONDS cap so no slide holds too long
+            # (that "extra" time is given to the closing CTA card instead,
+            # which is fine to sit a little longer).
             word_counts = [max(1, len(spec["caption"].split())) for spec in image_specs]
             total_words = sum(word_counts)
+            overflow = 0.0
             for spec, wc in zip(image_specs, word_counts):
-                spec["duration"] = max(1.5, audio_duration * (wc / total_words))
+                raw_duration = audio_duration * (wc / total_words)
+                if spec.get("is_cta"):
+                    spec["duration"] = max(1.5, raw_duration)
+                else:
+                    capped = min(raw_duration, MAX_SLIDE_SECONDS)
+                    overflow += raw_duration - capped
+                    spec["duration"] = max(1.5, capped)
+            image_specs[-1]["duration"] += overflow  # CTA card absorbs the difference
 
             print(f"Building video from {len(image_specs)} real-image slide(s)...")
             reel_video_bytes = build_reel_video(
@@ -2364,7 +2455,7 @@ def main():
         # instead of the morning run's link-post + carousel.
         print("Posting Facebook video...")
         fb_message = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\n{social_hashtags}"
-        facebook_ok = post_facebook_video(fb_message, reel_video_url)
+        facebook_ok = post_facebook_video(fb_message, reel_video_url, post_url)
 
         print("Posting Instagram Reel...")
         ig_caption = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
