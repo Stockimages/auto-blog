@@ -1003,30 +1003,37 @@ def split_script_into_captions(script_text, n_parts):
         return chunks[:n_parts]
 
 
-def build_reel_video(image_specs, audio_path, work_dir):
+def build_reel_video(image_specs, audio_path, work_dir, width=1080, height=1920):
     """
-    Builds a vertical (1080x1920) MP4 from real project images (hero +
-    section photos + a closing CTA card), each with a slow Ken Burns
-    zoom, a synced on-screen caption, and short fade in/out transitions —
-    narrated by an AI voiceover (see synthesize_voiceover) instead of
-    being silent.
+    Builds a vertical MP4 (default 1080x1920, 9:16 — Instagram/Facebook's
+    required reel shape; pass width=1080, height=1620 for a 2:3 version,
+    which is Pinterest's own best-performing ratio) from real project
+    images (hero + section photos + a closing CTA card), each with a slow
+    Ken Burns zoom, a synced on-screen caption, and short fade in/out
+    transitions — narrated by an AI voiceover (see synthesize_voiceover)
+    instead of being silent.
 
     `image_specs` is a list of dicts:
       {"bytes": <image bytes>, "caption": str or None, "duration": seconds}
     Durations should already sum to ~the voiceover's length (the caller
     computes this from get_audio_duration_seconds + word-weighted splits).
 
-    Used for Instagram Reels, Facebook video, and Pinterest video pins —
-    same file, three destinations. Returns the final MP4 bytes. Raises on
-    any ffmpeg failure (caller decides the fallback).
+    Called twice per video-mode run — once at the default 9:16 for
+    Instagram Reels/Facebook video, once at 2:3 for the Pinterest video
+    pin (Pinterest fully supports 9:16 too, but 2:3 is its own officially
+    best-performing ratio, and forcing the 9:16 file into a 2:3 pin
+    container was the cause of the black letterboxing bars). Returns the
+    final MP4 bytes. Raises on any ffmpeg failure (caller decides the
+    fallback).
     """
     os.makedirs(work_dir, exist_ok=True)
     fps = 30
     segment_paths = []
+    scale_w, scale_h = width * 3, height * 3  # upscale factor before zoompan, same ratio as the target
 
     watermark_path = os.path.join(work_dir, "watermark.png")
     with open(watermark_path, "wb") as f:
-        f.write(build_watermark_overlay_png())
+        f.write(build_watermark_overlay_png(canvas_size=(width, height)))
 
     for i, spec in enumerate(image_specs):
         img_path = os.path.join(work_dir, f"img_{i}.png")
@@ -1037,6 +1044,7 @@ def build_reel_video(image_specs, audio_path, work_dir):
         frames = max(1, int(round(duration * fps)))
         fade_dur = min(0.3, duration / 4)
         is_cta = bool(spec.get("is_cta"))
+        is_first_slide = (i == 0)
 
         # Zoom rate is calculated PER SLIDE (target zoom reached, right at
         # the slide's own last frame) rather than a fixed rate — a fixed
@@ -1057,11 +1065,12 @@ def build_reel_video(image_specs, audio_path, work_dir):
             # "crop" trims the overflow to the exact box — same idea as
             # object-fit: cover in CSS. No distortion, whatever the
             # source photo's original shape was.
-            f"scale=3240:5760:force_original_aspect_ratio=increase,"
-            f"crop=3240:5760,"
+            f"scale={scale_w}:{scale_h}:force_original_aspect_ratio=increase,"
+            f"crop={scale_w}:{scale_h},"
             f"zoompan=z='min(zoom+{zoom_rate:.8f},{target_zoom})':d={frames}:"
-            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps={fps},"
-            f"fade=t=in:st=0:d={fade_dur},fade=t=out:st={max(0, duration - fade_dur)}:d={fade_dur}"
+            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps},"
+            + ("" if is_first_slide else f"fade=t=in:st=0:d={fade_dur},")
+            + f"fade=t=out:st={max(0, duration - fade_dur)}:d={fade_dur}"
         )
 
         seg_path = os.path.join(work_dir, f"seg_{i}.mp4")
@@ -1418,22 +1427,25 @@ def build_pin_hashtags(labels, max_tags=5):
     return " ".join(tags)
 
 
-def extract_pin_description(html, hashtags="", max_length=500):
+def extract_pin_description(html, hashtags="", max_length=500, cta=""):
     """
     Pulls plain text from the article's opening <p> (the hook paragraph)
     to use as the Pinterest/Facebook/Instagram description — a genuine
     excerpt of the content, not just a repeat of the title or the on-image
-    text overlay. Always ends with "..." (a "read more" cue), whether it
-    was truncated for length or not. Hashtags (if provided) are appended
-    after that, within the length limit.
+    text overlay. Always ends with "...", whether it was truncated for
+    length or not, then an optional CTA line (matching the "Visit our
+    website" line already used in the Facebook/Instagram captions — added
+    here too for consistency), then hashtags (if provided) — all within
+    the length limit.
     """
     match = re.search(r"<p>(.*?)</p>", html, re.IGNORECASE | re.DOTALL)
     text = match.group(1) if match else html
     text = re.sub(r"<[^>]+>", "", text)  # strip any remaining HTML tags
     text = re.sub(r"\s+", " ", text).strip()
 
-    suffix = f" {hashtags}" if hashtags else ""
-    # Reserve room for the "..." ending plus the hashtag suffix.
+    cta_part = f"\n\n{cta}" if cta else ""
+    suffix = f"{cta_part}\n\n{hashtags}" if hashtags else cta_part
+    # Reserve room for the "..." ending plus the CTA/hashtag suffix.
     excerpt_limit = max_length - len(suffix) - 3
     if len(text) > excerpt_limit:
         text = text[:excerpt_limit].rsplit(" ", 1)[0]
@@ -1770,19 +1782,35 @@ def post_facebook_video(description, video_url, link):
 
         # Also add the link as a comment — wrapped separately so a comment
         # failure doesn't undo the fact that the video post itself already
-        # succeeded.
-        try:
-            comment_res = robust_request(
-                "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
-                data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
-                timeout=30,
-            )
-            if comment_res.ok:
-                print("Added link comment:", comment_res.json().get("id"))
-            else:
-                print(f"Facebook video link-comment failed ({comment_res.status_code}): {comment_res.text}")
-        except Exception as e:
-            print(f"Facebook video link-comment failed (video post still published fine): {e}")
+        # succeeded. Native video posts process ASYNCHRONOUSLY on
+        # Facebook's side (the id above comes back before the video is
+        # fully attached to a commentable post), so the very first attempt
+        # can land too early and get rejected even though the post is
+        # completely fine — retrying with a short wait fixes that instead
+        # of just giving up after one immediate try.
+        comment_posted = False
+        for attempt in range(4):
+            if attempt > 0:
+                wait_s = 10 * attempt  # 10s, 20s, 30s
+                print(f"Retrying link comment in {wait_s}s (attempt {attempt + 1}/4)...")
+                time.sleep(wait_s)
+            try:
+                comment_res = robust_request(
+                    "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                    data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                    timeout=30,
+                )
+                if comment_res.ok:
+                    print("Added link comment:", comment_res.json().get("id"))
+                    comment_posted = True
+                    break
+                else:
+                    print(f"Facebook video link-comment attempt {attempt + 1} failed "
+                          f"({comment_res.status_code}): {comment_res.text}")
+            except Exception as e:
+                print(f"Facebook video link-comment attempt {attempt + 1} failed: {e}")
+        if not comment_posted:
+            print("Giving up on the Facebook video link comment (video post still published fine).")
 
         return True
     except Exception as e:
@@ -2290,10 +2318,32 @@ def main():
             reel_video_url = upload_to_r2(reel_video_filepath)
             print(f"Video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
 
+            # A SECOND video, just for the Pinterest pin — same images,
+            # captions, and voiceover, re-rendered at 2:3 instead of 9:16.
+            # Pinterest fully supports 9:16 video pins, but 2:3 is its own
+            # officially best-performing ratio (and reusing the 9:16 file
+            # for both was the underlying cause of the black letterboxing
+            # bars Pinterest was adding to reconcile the mismatch with its
+            # expected pin shape). The Instagram/Facebook video above is
+            # untouched by this — it stays exactly 9:16 as required.
+            print("Building a 2:3 version for the Pinterest pin...")
+            pinterest_work_dir = os.path.join("images", f"reel-work-pin-{ts}")
+            pinterest_video_bytes = build_reel_video(
+                image_specs, audio_path, work_dir=pinterest_work_dir,
+                width=1080, height=1620,
+            )
+            print(f"Pinterest video ready ({len(pinterest_video_bytes) / 1024:.0f} KB).")
+
             # Pinterest's video-pin cover_image_url rejects WebP (every
-            # other image in this script is WebP) — it needs JPG/PNG. Build
-            # a one-off JPEG copy of the hero image just for this.
+            # other image in this script is WebP) — it needs JPG/PNG. Also,
+            # this MUST be cropped to the exact same 2:3 shape as the
+            # Pinterest video built just above (not just the raw hero
+            # photo's own shape, whatever Pexels happened to return that
+            # as, and not 9:16 either — that mismatch was the cause of the
+            # black letterboxing bars in the first place).
             pin_cover_img = Image.open(BytesIO(raw_hero)).convert("RGB")
+            pin_cover_img = crop_to_ratio(pin_cover_img, target_ratio=2 / 3)
+            pin_cover_img = pin_cover_img.resize((1080, 1620), Image.LANCZOS)
             pin_cover_out = BytesIO()
             pin_cover_img.save(pin_cover_out, format="JPEG", quality=85)
             pin_cover_filename = f"decor-{ts}-pin-cover.jpg"
@@ -2500,11 +2550,15 @@ def main():
         # clickable link-card — accepted trade-off) and an Instagram Reel,
         # instead of the morning run's link-post + carousel.
         print("Posting Facebook video...")
-        fb_message = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\n{social_hashtags}"
+        category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
+        fb_message = (
+            f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
+            f"👉 Visit our website for the full step-by-step guide!\n\n{social_hashtags}"
+        )
         facebook_ok = post_facebook_video(fb_message, reel_video_url, post_url)
 
         print("Posting Instagram Reel...")
-        ig_caption = f"{pin_hook}\n\n{draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
+        ig_caption = f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
         instagram_ok = post_instagram_reel(ig_caption, reel_video_url)
     else:
         # Image-mode (morning run, default): native photo post reusing the
@@ -2551,15 +2605,16 @@ def main():
         pinterest_token = get_pinterest_access_token()
         board_id = CATEGORY_BOARD_IDS.get(category, PINTEREST_BOARD_ID)
         if RUN_TYPE == "video":
-            with open(reel_video_filepath, "rb") as f:
-                reel_video_bytes_for_pin = f.read()
             pin_result = create_pinterest_video_pin(
                 pinterest_token,
                 board_id=board_id,
                 title=draft["title"],
-                description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
+                description=extract_pin_description(
+                    draft["html"], hashtags=pin_hashtags,
+                    cta="👉 Visit our website for the full step-by-step guide!",
+                ),
                 link=post_url,
-                video_bytes=reel_video_bytes_for_pin,
+                video_bytes=pinterest_video_bytes,
                 cover_image_url=pin_cover_url,
             )
         else:
@@ -2567,7 +2622,10 @@ def main():
                 pinterest_token,
                 board_id=board_id,
                 title=draft["title"],
-                description=extract_pin_description(draft["html"], hashtags=pin_hashtags),
+description=extract_pin_description(
+                    draft["html"], hashtags=pin_hashtags,
+                    cta="👉 Visit our website for the full step-by-step guide!",
+                ),
                 link=post_url,
                 image_url=hero_url,
             )
