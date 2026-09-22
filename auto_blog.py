@@ -161,6 +161,28 @@ def upload_to_r2(local_path):
     return f"{R2_PUBLIC_URL}/{key}"
 
 
+def delete_from_r2(local_path):
+    """
+    Deletes a file from the R2 bucket by the same key upload_to_r2 used
+    (the local path, forward-slashed). Called at the end of a run for
+    everything that was only ever needed ONCE — Facebook/Instagram/
+    Pinterest/TikTok all fetch a file from its R2 URL and keep their own
+    copy, so once posting is done there's nothing left pointing at it.
+    The hero image is the one exception (Blogger's post keeps embedding
+    that exact URL forever), so it's never passed here. Never raises —
+    a cleanup failure should never turn a successful run into a failed
+    one; it just means that one file lingers in R2 an extra day.
+    """
+    if not local_path:
+        return
+    try:
+        key = local_path.replace(os.sep, "/")
+        get_r2_client().delete_object(Bucket=R2_BUCKET_NAME, Key=key)
+        print(f"Cleaned up from R2: {key}")
+    except Exception as e:
+        print(f"R2 cleanup failed for {local_path} (harmless, continuing): {e}")
+
+
 # Controls which social-posting mode this run uses. Set via the GitHub
 # Actions workflow so the 6:30 AM trigger passes RUN_TYPE=image (current
 # carousel/link/image-pin behavior) and the 6:30 PM trigger passes
@@ -312,6 +334,54 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
+def get_trending_context(niche):
+    """
+    Asks Gemini (with Google Search grounding enabled) what's currently
+    being searched for / talked about in this niche, so generate_draft can
+    nudge its topic choice toward something people are actually looking
+    for right now instead of a purely random angle. Deliberately a
+    separate, small, free-text call — NOT the same call that generates the
+    structured JSON draft — because mixing Google Search grounding into a
+    call that must return strict JSON risks breaking that JSON (grounded
+    responses tend to add citations/commentary). Returns a short string,
+    or "" on any failure — this is a nice-to-have nudge, never something
+    the run should fail over.
+    """
+    try:
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY},
+            json={
+                "contents": [{"parts": [{"text": (
+                    f"Using Google Search, check what's currently trending or "
+                    f"getting a lot of search interest right now in the "
+                    f"{niche} niche — specifically thrifted/budget furniture "
+                    f"and decor flips. In 2-3 short sentences, name a couple "
+                    f"of specific current angles, items, or styles people "
+                    f"seem to be searching for/talking about. Be concrete "
+                    f"and brief — no preamble, no markdown."
+                )}]}],
+                "tools": [{"google_search": {}}],
+            },
+            timeout=60,
+        )
+        if not res.ok:
+            print(f"Trending-context lookup failed ({res.status_code}) — continuing without it.")
+            return ""
+        candidates = res.json().get("candidates", [])
+        if not candidates:
+            return ""
+        text = "".join(
+            part.get("text", "") for part in candidates[0].get("content", {}).get("parts", [])
+        ).strip()
+        if text:
+            print("Trending context:", text)
+        return text
+    except Exception as e:
+        print(f"Trending-context lookup failed ({e}) — continuing without it.")
+        return ""
+
+
 def generate_draft(history, niche):
     # Duplicate-topic avoidance window: at ~2 posts/day, checking only the
     # last 50 titles covers ~25 days — past that, older topics could start
@@ -341,12 +411,20 @@ def generate_draft(history, niche):
     categories_by_need = sorted(CATEGORIES, key=lambda c: category_counts[c])
     category_counts_str = ", ".join(f"{c}: {category_counts[c]}" for c in CATEGORIES)
 
+    trending_context = get_trending_context(niche)
+    trending_block = (
+        f"\nWhat's currently trending in this niche (from a live search just now) — "
+        f"lean toward this if it genuinely fits a good topic, but don't force it:\n"
+        f"{trending_context}\n"
+        if trending_context else ""
+    )
+
     prompt = f"""You are a real person who runs a {niche} blog and personally writes every
 post. You've done these projects yourself, in your own home, on a real budget.
 Posts are shared to Pinterest automatically the moment they're published, so
 the opening line has to earn a click — then the article has to actually
 deliver, like a friend explaining exactly how they did something.
-
+{trending_block}
 Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
@@ -1786,14 +1864,38 @@ def post_facebook_video(description, video_url, link):
         # Facebook's side (the id above comes back before the video is
         # fully attached to a commentable post), so the very first attempt
         # can land too early and get rejected even though the post is
-        # completely fine — retrying with a short wait fixes that instead
-        # of just giving up after one immediate try.
+        # completely fine — retrying with a short wait fixes that.
+        #
+        # IMPORTANT: this retry must be idempotent. robust_request() already
+        # retries on its own on a network timeout/5xx — and posting a
+        # comment isn't idempotent (each successful POST creates a NEW
+        # comment), so if a POST actually succeeded on Facebook's side but
+        # the response back to us was lost (timeout), a naive retry posts
+        # a SECOND copy. That's exactly what was causing the double-comment
+        # (and, on the runs where every attempt genuinely failed,
+        # missing-comment) inconsistency. So before each retry, check
+        # whether our comment is already there first, instead of just
+        # blindly posting again.
         comment_posted = False
         for attempt in range(4):
             if attempt > 0:
                 wait_s = 10 * attempt  # 10s, 20s, 30s
-                print(f"Retrying link comment in {wait_s}s (attempt {attempt + 1}/4)...")
+                print(f"Checking/retrying link comment in {wait_s}s (attempt {attempt + 1}/4)...")
                 time.sleep(wait_s)
+                try:
+                    existing = robust_request(
+                        "GET", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                        params={"access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                        timeout=30,
+                    )
+                    if existing.ok and any(
+                        c.get("message") == link for c in existing.json().get("data", [])
+                    ):
+                        print("Link comment already present from an earlier attempt — not re-posting.")
+                        comment_posted = True
+                        break
+                except Exception as e:
+                    print(f"Couldn't check for an existing comment ({e}) — trying to post anyway.")
             try:
                 comment_res = robust_request(
                     "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
@@ -2156,6 +2258,7 @@ def main():
             f.write(ig_cta_compressed)
         ig_slide4_url = upload_to_r2(ig_slide4_filepath)
 
+        ig_slide3_filepath = None
         if RUN_TYPE != "video":
             # --- Image-mode (default/morning run): the 3rd carousel slide
             # (a second hook photo, reusing raw_hero — no extra Pexels call).
@@ -2666,6 +2769,17 @@ description=extract_pin_description(
         f"Pinterest: {tick(pinterest_ok)}\n"
         f"Tumblr: {tick(tumblr_ok)}",
     )
+
+    # Clean up everything in R2 that was only ever needed to get through
+    # THIS run's posting (Facebook/Instagram/Pinterest/Tumblr have all
+    # fetched their own copies by now) — keeps R2 storage from growing
+    # forever, especially now that video-mode uploads a couple of MB per
+    # run instead of a few KB. hero_url is deliberately NOT included:
+    # Blogger's post keeps embedding that exact URL permanently.
+    print("Cleaning up temporary R2 files...")
+    for path in [ig_filepath, ig_slide2_filepath, ig_slide3_filepath,
+                 ig_slide4_filepath, reel_video_filepath, pin_cover_filepath]:
+        delete_from_r2(path)
 
 
 if __name__ == "__main__":
