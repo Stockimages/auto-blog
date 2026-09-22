@@ -1,23 +1,23 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/09/how-to-turn-7-thrifted-wooden-napkin.html",
-    "timestamp": "2026-09-22T10:19:35.808790+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-09-22T13:38:48.549432+00:00"
   },
   "facebook": {
-    "success": true,
-    "timestamp": "2026-09-22T10:19:35.808790+00:00"
+    "success": false,
+    "timestamp": "2026-09-22T13:38:48.549432+00:00"
   },
   "pinterest": {
-    "success": true,
-    "timestamp": "2026-09-22T10:19:35.808790+00:00"
+    "success": false,
+    "timestamp": "2026-09-22T13:38:48.549432+00:00"
   },
   "instagram": {
-    "success": true,
-    "timestamp": "2026-09-22T10:19:35.808790+00:00"
+    "success": false,
+    "timestamp": "2026-09-22T13:38:48.549432+00:00"
   },
   "tumblr": {
-    "success": true,
-    "timestamp": "2026-09-22T10:19:35.808790+00:00"
+    "success": false,
+    "timestamp": "2026-09-22T13:38:48.549432+00:00"
   }
 }
