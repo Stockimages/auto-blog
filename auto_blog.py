@@ -343,12 +343,16 @@ def get_trending_context(niche):
     separate, small, free-text call — NOT the same call that generates the
     structured JSON draft — because mixing Google Search grounding into a
     call that must return strict JSON risks breaking that JSON (grounded
-    responses tend to add citations/commentary). Returns a short string,
-    or "" on any failure — this is a nice-to-have nudge, never something
-    the run should fail over.
+    responses tend to add citations/commentary). Uses robust_request (not
+    a bare requests.post) so a 429 — hit occasionally when this call lands
+    right before the main article-generation call's own burst of retries —
+    gets retried with backoff instead of just giving up on the first try.
+    Returns a short string, or "" on any failure — this is a nice-to-have
+    nudge, never something the run should fail over.
     """
     try:
-        res = requests.post(
+        res = robust_request(
+            "POST",
             f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
             params={"key": GEMINI_API_KEY},
             json={
