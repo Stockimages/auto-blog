@@ -1,23 +1,23 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/09/how-to-turn-12-thrifted-log-holder-into.html",
-    "timestamp": "2026-09-23T01:35:19.738991+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-09-23T13:43:13.318896+00:00"
   },
   "facebook": {
-    "success": true,
-    "timestamp": "2026-09-23T01:35:19.738991+00:00"
+    "success": false,
+    "timestamp": "2026-09-23T13:43:13.318896+00:00"
   },
   "pinterest": {
-    "success": true,
-    "timestamp": "2026-09-23T01:35:19.738991+00:00"
+    "success": false,
+    "timestamp": "2026-09-23T13:43:13.318896+00:00"
   },
   "instagram": {
-    "success": true,
-    "timestamp": "2026-09-23T01:35:19.738991+00:00"
+    "success": false,
+    "timestamp": "2026-09-23T13:43:13.318896+00:00"
   },
   "tumblr": {
-    "success": true,
-    "timestamp": "2026-09-23T01:35:19.738991+00:00"
+    "success": false,
+    "timestamp": "2026-09-23T13:43:13.318896+00:00"
   }
 }
