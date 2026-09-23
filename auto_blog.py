@@ -334,58 +334,6 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
-def get_trending_context(niche):
-    """
-    Asks Gemini (with Google Search grounding enabled) what's currently
-    being searched for / talked about in this niche, so generate_draft can
-    nudge its topic choice toward something people are actually looking
-    for right now instead of a purely random angle. Deliberately a
-    separate, small, free-text call — NOT the same call that generates the
-    structured JSON draft — because mixing Google Search grounding into a
-    call that must return strict JSON risks breaking that JSON (grounded
-    responses tend to add citations/commentary). Uses robust_request (not
-    a bare requests.post) so a 429 — hit occasionally when this call lands
-    right before the main article-generation call's own burst of retries —
-    gets retried with backoff instead of just giving up on the first try.
-    Returns a short string, or "" on any failure — this is a nice-to-have
-    nudge, never something the run should fail over.
-    """
-    try:
-        res = robust_request(
-            "POST",
-            f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent",
-            params={"key": GEMINI_API_KEY},
-            json={
-                "contents": [{"parts": [{"text": (
-                    f"Using Google Search, check what's currently trending or "
-                    f"getting a lot of search interest right now in the "
-                    f"{niche} niche — specifically thrifted/budget furniture "
-                    f"and decor flips. In 2-3 short sentences, name a couple "
-                    f"of specific current angles, items, or styles people "
-                    f"seem to be searching for/talking about. Be concrete "
-                    f"and brief — no preamble, no markdown."
-                )}]}],
-                "tools": [{"google_search": {}}],
-            },
-            timeout=60,
-        )
-        if not res.ok:
-            print(f"Trending-context lookup failed ({res.status_code}) — continuing without it.")
-            return ""
-        candidates = res.json().get("candidates", [])
-        if not candidates:
-            return ""
-        text = "".join(
-            part.get("text", "") for part in candidates[0].get("content", {}).get("parts", [])
-        ).strip()
-        if text:
-            print("Trending context:", text)
-        return text
-    except Exception as e:
-        print(f"Trending-context lookup failed ({e}) — continuing without it.")
-        return ""
-
-
 def generate_draft(history, niche):
     # Duplicate-topic avoidance window: at ~2 posts/day, checking only the
     # last 50 titles covers ~25 days — past that, older topics could start
@@ -415,20 +363,12 @@ def generate_draft(history, niche):
     categories_by_need = sorted(CATEGORIES, key=lambda c: category_counts[c])
     category_counts_str = ", ".join(f"{c}: {category_counts[c]}" for c in CATEGORIES)
 
-    trending_context = get_trending_context(niche)
-    trending_block = (
-        f"\nWhat's currently trending in this niche (from a live search just now) — "
-        f"lean toward this if it genuinely fits a good topic, but don't force it:\n"
-        f"{trending_context}\n"
-        if trending_context else ""
-    )
-
     prompt = f"""You are a real person who runs a {niche} blog and personally writes every
 post. You've done these projects yourself, in your own home, on a real budget.
 Posts are shared to Pinterest automatically the moment they're published, so
 the opening line has to earn a click — then the article has to actually
 deliver, like a friend explaining exactly how they did something.
-{trending_block}
+
 Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
@@ -592,64 +532,77 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
         models_to_try.append(FALLBACK_TEXT_MODEL_3)
 
     last_error = None
-    for model_index, model in enumerate(models_to_try):
-        is_last_model = model_index == len(models_to_try) - 1
+    num_cycles = 2
+    cycle_wait = 150  # 2.5 min between full cycles — long enough for a wider, short-lived outage to clear
 
-        for attempt in range(1, max_attempts + 1):
-            is_last_attempt_for_model = attempt == max_attempts
+    for cycle in range(1, num_cycles + 1):
+        is_last_cycle = cycle == num_cycles
 
-            try:
-                res = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    params={"key": GEMINI_API_KEY},
-                    json={"contents": [{"parts": [{"text": prompt}]}]},
-                    timeout=150,
-                )
-            except requests.exceptions.RequestException as e:
-                last_error = f"network error: {e}"
-                if is_last_attempt_for_model and is_last_model:
-                    raise RuntimeError(f"Gemini request failed on all models/attempts: {last_error}")
-                if not is_last_attempt_for_model:
-                    delay = wait_seconds[attempt - 1]
-                    print(f"[{model}] Gemini request failed ({e}), retrying in {delay}s "
-                          f"(attempt {attempt}/{max_attempts})...")
-                    time.sleep(delay)
-                continue
+        for model_index, model in enumerate(models_to_try):
+            is_last_model = model_index == len(models_to_try) - 1
+            is_final_attempt_ever = is_last_model and is_last_cycle  # only raise once we're truly out of options
 
-            if res.ok:
-                text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-                text = text.replace("```json", "").replace("```", "").strip()
+            for attempt in range(1, max_attempts + 1):
+                is_last_attempt_for_model = attempt == max_attempts
+
                 try:
-                    return json.loads(text)
-                except json.JSONDecodeError as e:
-                    last_error = f"invalid JSON: {e}"
-                    if is_last_attempt_for_model and is_last_model:
-                        raise RuntimeError(f"Gemini returned invalid JSON on all models/attempts: {last_error}")
+                    res = requests.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        params={"key": GEMINI_API_KEY},
+                        json={"contents": [{"parts": [{"text": prompt}]}]},
+                        timeout=150,
+                    )
+                except requests.exceptions.RequestException as e:
+                    last_error = f"network error: {e}"
+                    if is_last_attempt_for_model and is_final_attempt_ever:
+                        raise RuntimeError(f"Gemini request failed on all models/attempts/cycles: {last_error}")
                     if not is_last_attempt_for_model:
                         delay = wait_seconds[attempt - 1]
-                        print(f"[{model}] Gemini returned invalid JSON ({e}), retrying in {delay}s "
+                        print(f"[{model}] Gemini request failed ({e}), retrying in {delay}s "
                               f"(attempt {attempt}/{max_attempts})...")
                         time.sleep(delay)
                     continue
 
-            # Retry only on transient errors (overloaded / rate-limited / server hiccup).
-            # Fail immediately on anything else (e.g. bad API key, bad request).
-            transient = res.status_code in (429, 500, 502, 503, 504)
-            last_error = f"HTTP {res.status_code}: {res.text[:200]}"
+                if res.ok:
+                    text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    text = text.replace("```json", "").replace("```", "").strip()
+                    try:
+                        return json.loads(text)
+                    except json.JSONDecodeError as e:
+                        last_error = f"invalid JSON: {e}"
+                        if is_last_attempt_for_model and is_final_attempt_ever:
+                            raise RuntimeError(f"Gemini returned invalid JSON on all models/attempts/cycles: {last_error}")
+                        if not is_last_attempt_for_model:
+                            delay = wait_seconds[attempt - 1]
+                            print(f"[{model}] Gemini returned invalid JSON ({e}), retrying in {delay}s "
+                                  f"(attempt {attempt}/{max_attempts})...")
+                            time.sleep(delay)
+                        continue
 
-            if not transient:
-                raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
+                # Retry only on transient errors (overloaded / rate-limited / server hiccup).
+                # Fail immediately on anything else (e.g. bad API key, bad request) — those
+                # won't be fixed by waiting, on this cycle or the next.
+                transient = res.status_code in (429, 500, 502, 503, 504)
+                last_error = f"HTTP {res.status_code}: {res.text[:200]}"
 
-            if is_last_attempt_for_model and is_last_model:
-                raise RuntimeError(f"Gemini text generation failed on all models/attempts: {last_error}")
+                if not transient:
+                    raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
 
-            if not is_last_attempt_for_model:
-                delay = wait_seconds[attempt - 1]
-                print(f"[{model}] Gemini text generation failed ({res.status_code}), retrying in {delay}s "
-                      f"(attempt {attempt}/{max_attempts})...")
-                time.sleep(delay)
-            else:
-                print(f"[{model}] exhausted all attempts, switching to fallback model...")
+                if is_last_attempt_for_model and is_final_attempt_ever:
+                    raise RuntimeError(f"Gemini text generation failed on all models/attempts/cycles: {last_error}")
+
+                if not is_last_attempt_for_model:
+                    delay = wait_seconds[attempt - 1]
+                    print(f"[{model}] Gemini text generation failed ({res.status_code}), retrying in {delay}s "
+                          f"(attempt {attempt}/{max_attempts})...")
+                    time.sleep(delay)
+                else:
+                    print(f"[{model}] exhausted all attempts, switching to fallback model...")
+
+        if not is_last_cycle:
+            print(f"All models exhausted on cycle {cycle}/{num_cycles} — Gemini may be having a "
+                  f"broader rough patch. Waiting {cycle_wait}s, then trying the whole model list again...")
+            time.sleep(cycle_wait)
 
 
 def normalize_draft(draft):
