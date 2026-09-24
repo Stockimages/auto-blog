@@ -209,6 +209,8 @@ TEXT_MODEL = os.environ.get("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
 FALLBACK_TEXT_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
 FALLBACK_TEXT_MODEL_2 = os.environ.get("GEMINI_FALLBACK_MODEL_2", "gemini-3.6-flash")
 FALLBACK_TEXT_MODEL_3 = os.environ.get("GEMINI_FALLBACK_MODEL_3", "gemini-3.5-flash")
+FALLBACK_TEXT_MODEL_4 = os.environ.get("GEMINI_FALLBACK_MODEL_4", "gemini-3.5-flash-lite")
+FALLBACK_TEXT_MODEL_5 = os.environ.get("GEMINI_FALLBACK_MODEL_5", "gemini-3.1-flash-lite")
 
 HISTORY_FILE = "topics_history.json"
 CONFIG_FILE = "config.json"
@@ -518,22 +520,28 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "reel_script": "..."
 }}"""
 
-    max_attempts = 3
-    wait_seconds = [20, 45]  # delay before attempts 2, 3 (per model)
+    max_attempts = 1  # one try per model, then immediately move to the next — with 6 different
+    # models in the list now, each burning its own separate small daily quota, spending 2-3
+    # retries on ONE model before moving on wastes quota that a fresh, different model would
+    # rather use for a real attempt.
+    wait_seconds = []  # no in-model retry delay needed when max_attempts is 1
 
-    # If the primary model is overloaded/unavailable across all its retries,
-    # fall back to a second, proven-stable model rather than failing the run.
+    # If the primary model is overloaded/unavailable, fall back through a chain of models
+    # rather than failing the run — each model has its own separate free-tier daily quota, so
+    # trying 6 different ones is far more likely to land a working one than retrying a single
+    # model repeatedly. The two "-lite" models at the end have a much higher daily quota than
+    # the regular flash models, so they're kept as the last resort.
     models_to_try = [TEXT_MODEL]
-    if FALLBACK_TEXT_MODEL and FALLBACK_TEXT_MODEL not in models_to_try:
-        models_to_try.append(FALLBACK_TEXT_MODEL)
-    if FALLBACK_TEXT_MODEL_2 and FALLBACK_TEXT_MODEL_2 not in models_to_try:
-        models_to_try.append(FALLBACK_TEXT_MODEL_2)
-    if FALLBACK_TEXT_MODEL_3 and FALLBACK_TEXT_MODEL_3 not in models_to_try:
-        models_to_try.append(FALLBACK_TEXT_MODEL_3)
+    for fallback in [FALLBACK_TEXT_MODEL, FALLBACK_TEXT_MODEL_2, FALLBACK_TEXT_MODEL_3,
+                      FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5]:
+        if fallback and fallback not in models_to_try:
+            models_to_try.append(fallback)
 
     last_error = None
-    num_cycles = 2
-    cycle_wait = 150  # 2.5 min between full cycles — long enough for a wider, short-lived outage to clear
+    num_cycles = 1  # one pass through the whole model list — with 6 models to try, each
+    # contributing its own separate quota, there's no need to loop back and re-try the exact
+    # same 6 models again; that would just burn quota with attempts already known to fail.
+    cycle_wait = 0
 
     for cycle in range(1, num_cycles + 1):
         is_last_cycle = cycle == num_cycles
