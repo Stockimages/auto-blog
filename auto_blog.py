@@ -84,6 +84,26 @@ TIKTOK_CLIENT_KEY = os.environ.get("TIKTOK_CLIENT_KEY")
 TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
 TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
 
+
+def env_flag(name):
+    """True only if the env var is set to 1/true/yes/on (anything else = off)."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# On/off switches, set as GitHub repo *Variables* (Settings -> Secrets and
+# variables -> Actions -> Variables) so they can be flipped without editing
+# code. Both default to OFF, so a locked Meta account or a pending TikTok
+# audit can never cause red-cross emails or failed runs.
+#   ENABLE_META   = true  -> post to Facebook + Instagram (needs a valid token)
+#   ENABLE_TIKTOK = true  -> post the video to TikTok (needs audited Direct Post)
+ENABLE_META = env_flag("ENABLE_META")
+ENABLE_TIKTOK = env_flag("ENABLE_TIKTOK")
+#   ENABLE_GOOGLE_INDEXING = true -> also call Google's Indexing API per post.
+#   Off by default: Google only supports that API for JobPosting/livestream
+#   pages, so for blog posts it doesn't speed anything up and misuse can get
+#   API access revoked. Google finds posts through the sitemap + hub page.
+ENABLE_GOOGLE_INDEXING = env_flag("ENABLE_GOOGLE_INDEXING")
+
 # Facebook Page — auto-posts a link to the Page right after each Blogger post.
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
@@ -221,6 +241,7 @@ FALLBACK_TEXT_MODEL_4 = os.environ.get("GEMINI_FALLBACK_MODEL_4", "gemini-3.5-fl
 FALLBACK_TEXT_MODEL_5 = os.environ.get("GEMINI_FALLBACK_MODEL_5", "gemini-3.1-flash-lite")
 
 HISTORY_FILE = "topics_history.json"
+MAX_TOPIC_ATTEMPTS = 4  # tries to get a non-duplicate topic before skipping the run
 CONFIG_FILE = "config.json"
 DEFAULT_NICHE = "budget-friendly home decor"
 
@@ -344,6 +365,56 @@ def save_history(history):
         json.dump(history, f, indent=2)
 
 
+# Words that appear in nearly every title on this blog (the format itself),
+# so they must not count as "same topic" evidence when comparing titles.
+_TITLE_FILLER = {
+    "a", "an", "the", "and", "or", "of", "to", "into", "in", "on", "for", "with",
+    "your", "you", "my", "i", "this", "that", "it", "its", "is", "are", "how",
+    "turn", "make", "made", "making", "diy", "thrifted", "thrift", "store",
+    "vintage", "flip", "makeover", "look", "looks", "like", "now", "new",
+    "cheap", "budget", "easy", "simple", "under", "from", "that", "one",
+    "weekend", "hour", "hours", "step", "guide", "ideas", "idea", "real",
+    "heres", "here", "spent", "only", "just", "about", "best", "way",
+}
+
+
+def _title_keywords(title):
+    words = re.findall(r"[a-z]+", title.lower().replace("'", ""))
+    return {w for w in words if w not in _TITLE_FILLER and len(w) > 2}
+
+
+def find_duplicate_title(title, history, threshold=0.5):
+    """
+    Returns the existing title that `title` is too similar to, or None.
+    Compares topic keywords (the format words every title shares are
+    ignored, as are dollar amounts), so "$12 Thrifted Globe into a $450
+    Vintage English Terrestrial Globe" is caught as a repeat of the same
+    globe project even if the prices or wording change.
+    """
+    new_kw = _title_keywords(title)
+    if not new_kw:
+        return None
+    for h in history:
+        old_title = h.get("title", "")
+        old_kw = _title_keywords(old_title)
+        if not old_kw:
+            continue
+        overlap = len(new_kw & old_kw) / len(new_kw | old_kw)
+        if overlap >= threshold:
+            return old_title
+    return None
+
+
+TITLE_STYLES = [
+    "RESULT-FIRST: lead with the transformation, e.g. \"This $9 Thrifted Lamp Now Looks Like a $300 Designer Piece\"",
+    "QUESTION: a curious question the project answers, e.g. \"Can a $12 Thrifted Mirror Really Pass for Antique Brass?\"",
+    "FIRST PERSON: what you did and spent, e.g. \"I Spent $18 Turning a Thrift Store Find Into a Hanging Planter\"",
+    "PLAIN DIY: a clear search-friendly tutorial title, e.g. \"DIY Aged Brass Boot Tray From a Thrifted Metal Tray\"",
+    "BEFORE-AND-AFTER: e.g. \"From Thrift Store Colander to Zinc Planter: A $18 Makeover\"",
+    "BUDGET ANGLE: lead with the saving, e.g. \"A $20 Entryway Bench That Looks Like It Cost $400\"",
+]
+
+
 def generate_draft(history, niche):
     # Duplicate-topic avoidance window: at ~2 posts/day, checking only the
     # last 50 titles covers ~25 days — past that, older topics could start
@@ -361,6 +432,10 @@ def generate_draft(history, niche):
     )
 
     banned_list = ", ".join(f'"{w}"' for w in BANNED_PHRASES)
+
+    # Titles had become samey ("How to Turn a $X Thrifted Y into a $Z ..."),
+    # so each run is handed one randomly-picked title style to follow.
+    title_style = random.choice(TITLE_STYLES)
 
     # Count how many past posts fell in each fixed category so we can nudge
     # Gemini toward whichever categories are under-served, instead of every
@@ -383,6 +458,10 @@ Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
 Pick ONE fresh, specific, practical angle on {niche} that is not in that list.
+
+TITLE STYLE for THIS post (the site's titles had become too similar to each
+other, so follow this one): {title_style}. Do NOT start the title with
+"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W".
 
 CATEGORY (required): every post on this site is filed under exactly ONE of
 these fixed categories, which is also the site's navigation menu — pick
@@ -1769,20 +1848,11 @@ def submit_url_for_indexing(url):
         print(f"Indexing API submission failed (post still published fine): {e}")
 
 
-def submit_to_bing(url):
+def _bing_submit_url(url):
     """
-    Tell Bing to (re)crawl this URL now, via the Bing Webmaster Submission
-    API, using the site-linked apikey stored in BING_API_KEY. Bing's index
-    also backs Yahoo and DuckDuckGo, so this one call effectively notifies
-    all three. Never raises — if this fails or isn't configured, the post
-    is still published and still gets indexed eventually on Bing's normal
-    sitemap crawl, just slower.
+    One Bing Submission API call. Returns (ok, quota_exhausted).
+    Never raises.
     """
-    if not BING_API_KEY:
-        print("BING_API_KEY not set — skipping Bing instant indexing "
-              "(post will still be found via the sitemap eventually).")
-        return
-
     try:
         res = robust_request(
             "POST",
@@ -1792,11 +1862,173 @@ def submit_to_bing(url):
             timeout=30,
         )
         if res.ok:
-            print("Submitted to Bing Submission API:", url)
-        else:
-            print(f"Bing Submission API call failed ({res.status_code}): {res.text}")
+            return True, False
+        print(f"Bing Submission API call failed ({res.status_code}): {res.text}")
+        return False, "quota" in res.text.lower()
     except Exception as e:
-        print(f"Bing Submission API call failed (post still published fine): {e}")
+        print(f"Bing Submission API call failed: {e}")
+        return False, False
+
+
+def submit_to_bing(url):
+    """
+    Tell Bing to (re)crawl this URL now, via the Bing Webmaster Submission
+    API, using the site-linked apikey stored in BING_API_KEY. Bing's index
+    also backs Yahoo and DuckDuckGo, so this one call effectively notifies
+    all three. Never raises — if this fails or isn't configured, the post
+    is still published and still gets indexed eventually on Bing's normal
+    sitemap crawl, just slower. Returns True if Bing accepted the URL.
+    """
+    if not BING_API_KEY:
+        print("BING_API_KEY not set — skipping Bing instant indexing "
+              "(post will still be found via the sitemap eventually).")
+        return False
+    ok, _quota = _bing_submit_url(url)
+    if ok:
+        print("Submitted to Bing Submission API:", url)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Indexing boost: "all posts" hub page + gradual Bing backlog submission.
+# Neither forces Google/Bing to index anything (nothing can) — they make every
+# post reachable from one well-linked page and re-notify Bing about older URLs.
+# ---------------------------------------------------------------------------
+BING_BACKLOG_FILE = "bing_submitted.json"   # URLs already sent to Bing (committed to the repo)
+BING_BACKLOG_PER_RUN = 10                   # old URLs to send per run, so the daily quota is never the problem
+HUB_PAGE_TITLE = "All Posts: Budget Home Decor & Thrift Flip Ideas"
+
+
+def _load_url_set(path):
+    try:
+        with open(path) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, ValueError):
+        return set()
+
+
+def _save_url_set(path, urls):
+    with open(path, "w") as f:
+        json.dump(sorted(urls), f, indent=2)
+
+
+def fetch_all_live_posts(access_token):
+    """Every live post on the blog (title, url, labels, published), newest first."""
+    posts, page_token = [], None
+    while True:
+        params = {
+            "maxResults": 500, "fetchBodies": "false", "status": "live",
+            "fields": "nextPageToken,items(title,url,labels,published)",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        res = robust_request(
+            "GET", f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/posts",
+            headers={"Authorization": f"Bearer {access_token}"}, params=params, timeout=60,
+        )
+        if not res.ok:
+            raise RuntimeError(f"Could not list Blogger posts ({res.status_code}): {res.text}")
+        data = res.json()
+        posts.extend(data.get("items", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    posts.sort(key=lambda p: p.get("published", ""), reverse=True)
+    return posts
+
+
+def build_hub_html(posts):
+    """One page linking every post, grouped by category (newest first)."""
+    by_category = {}
+    for p in posts:
+        category = (p.get("labels") or ["General Decor"])[0]
+        by_category.setdefault(category, []).append(p)
+    ordered = [c for c in CATEGORIES if c in by_category] + sorted(c for c in by_category if c not in CATEGORIES)
+
+    parts = [
+        f"<p>Every DecorVibe project in one place: {len(posts)} budget-friendly home decor "
+        f"and thrift-flip guides, grouped by room and style, newest first.</p>"
+    ]
+    for category in ordered:
+        items = by_category[category]
+        parts.append(f"<h2>{html.escape(category)} ({len(items)})</h2>")
+        parts.append("<ul>")
+        for p in items:
+            parts.append(f'<li><a href="{html.escape(p["url"], quote=True)}">{html.escape(p["title"])}</a></li>')
+        parts.append("</ul>")
+    return "\n".join(parts)
+
+
+def update_hub_page(access_token, posts):
+    """Creates the hub page on first run, updates it in place afterwards. Returns its URL."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    base = f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/pages"
+    payload = {"title": HUB_PAGE_TITLE, "content": build_hub_html(posts)}
+
+    res = robust_request("GET", base, headers=headers,
+                         params={"fetchBodies": "false", "fields": "items(id,title,url)"}, timeout=30)
+    if not res.ok:
+        raise RuntimeError(f"Could not list Blogger pages ({res.status_code}): {res.text}")
+    existing = next((pg for pg in res.json().get("items", []) if pg.get("title") == HUB_PAGE_TITLE), None)
+
+    if existing:
+        r = robust_request("PUT", f"{base}/{existing['id']}", headers=headers, json=payload, timeout=60)
+    else:
+        r = robust_request("POST", base, headers=headers, json=payload, timeout=60)
+    if not r.ok:
+        raise RuntimeError(f"Hub page save failed ({r.status_code}): {r.text}")
+    return r.json().get("url") or (existing or {}).get("url")
+
+
+def boost_indexing(post_url, bing_ok):
+    """
+    Runs after publishing. Never raises. (1) Refreshes the all-posts hub
+    page, (2) sends a few not-yet-submitted URLs (hub page first, then
+    newest-to-oldest posts) to Bing, remembering which were sent.
+    """
+    submitted = _load_url_set(BING_BACKLOG_FILE)
+    if bing_ok and post_url:
+        submitted.add(post_url)
+
+    posts, hub_url = [], None
+    try:
+        token = get_access_token()
+        posts = fetch_all_live_posts(token)
+        print(f"Blogger reports {len(posts)} live posts.")
+        hub_url = update_hub_page(token, posts)
+        print("Hub page updated:", hub_url)
+    except Exception as e:
+        print(f"Hub page update failed (post is still published fine): {e}")
+
+    if BING_API_KEY:
+        try:
+            candidates = ([hub_url] if hub_url else []) + [p["url"] for p in posts]
+            todo = [u for u in candidates if u and u not in submitted][:BING_BACKLOG_PER_RUN]
+            sent, failures = 0, 0
+            for u in todo:
+                ok, quota_hit = _bing_submit_url(u)
+                if ok:
+                    submitted.add(u)
+                    sent += 1
+                    failures = 0
+                elif quota_hit:
+                    print("Bing daily quota reached — stopping, will continue next run.")
+                    break
+                else:
+                    failures += 1
+                    if failures >= 3:
+                        print("Bing keeps rejecting URLs — stopping for this run.")
+                        break
+                time.sleep(1)
+            waiting = len([u for u in candidates if u and u not in submitted])
+            print(f"Bing backlog: sent {sent} URL(s) this run, {waiting} still waiting.")
+        except Exception as e:
+            print(f"Bing backlog submission failed (post is still published fine): {e}")
+
+    try:
+        _save_url_set(BING_BACKLOG_FILE, submitted)
+    except Exception as e:
+        print(f"Could not save {BING_BACKLOG_FILE}: {e}")
 
 
 def check_meta_token_health():
@@ -2267,8 +2499,24 @@ def main():
     try:
         print(f"Niche: {niche}")
         print("Asking Gemini for a topic + article...")
-        draft = generate_draft(history, niche)
-        draft = normalize_draft(draft)
+        # Code-level duplicate guard: the prompt already tells Gemini not to
+        # repeat topics, but that is only a request. If the chosen topic is
+        # too close to an existing post, ask again (showing the rejected
+        # title in the "already covered" list) instead of publishing a repeat.
+        prompt_history = list(history)
+        for attempt in range(1, MAX_TOPIC_ATTEMPTS + 1):
+            draft = normalize_draft(generate_draft(prompt_history, niche))
+            duplicate_of = find_duplicate_title(draft["title"], history)
+            if duplicate_of is None:
+                break
+            print(f"Topic '{draft['title']}' is too similar to existing post "
+                  f"'{duplicate_of}' (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}) — asking for a different one.")
+            prompt_history = prompt_history + [{"title": draft["title"]}]
+        else:
+            raise RuntimeError(
+                f"Could not get a non-duplicate topic after {MAX_TOPIC_ATTEMPTS} attempts "
+                f"(last: '{draft['title']}'). Nothing was published this run."
+            )
         print("Topic chosen:", draft["title"])
 
         category = draft["category"]
@@ -2742,11 +2990,15 @@ def main():
         )
         raise
 
-    print("Notifying Google Indexing API...")
-    submit_url_for_indexing(post_url)
+    if ENABLE_GOOGLE_INDEXING:
+        print("Notifying Google Indexing API...")
+        submit_url_for_indexing(post_url)
+    else:
+        print("Google Indexing API is switched off (ENABLE_GOOGLE_INDEXING is not 'true') — skipping; "
+              "Google finds posts via the sitemap and the hub page.")
 
     print("Notifying Bing Submission API...")
-    submit_to_bing(post_url)
+    bing_ok = submit_to_bing(post_url)
 
     # Pinterest keeps a modest hashtag count (its own norms lean lighter);
     # Instagram/Facebook use a richer set from the same tag pool, since more
@@ -2754,8 +3006,11 @@ def main():
     pin_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []), max_tags=5)
     social_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []), max_tags=15)
 
-    meta_token_ok = check_meta_token_health()
-    if not meta_token_ok:
+    if not ENABLE_META:
+        print("Facebook + Instagram are switched off (ENABLE_META is not 'true') — skipping.")
+        facebook_ok = None
+        instagram_ok = None
+    elif not check_meta_token_health():
         print("Skipping Facebook + Instagram posting this run — see the health check message above.")
         facebook_ok = False
         instagram_ok = False
@@ -2862,10 +3117,15 @@ description=extract_pin_description(
 
     # TikTok: video runs only (None = not attempted, shown as "skipped").
     tiktok_ok = None
-    if RUN_TYPE == "video":
+    if not ENABLE_TIKTOK:
+        print("TikTok is switched off (ENABLE_TIKTOK is not 'true') — skipping.")
+    elif RUN_TYPE == "video":
         print("Posting to TikTok...")
         tiktok_caption = f"{pin_hook}\n\n{draft['title']}\n\nFull guide on our website 🔗\n\n{pin_hashtags}"
         tiktok_ok = post_to_tiktok(reel_video_filepath, tiktok_caption)
+
+    print("Updating the all-posts hub page + Bing backlog...")
+    boost_indexing(post_url, bing_ok)
 
     save_status(
         blogger_ok=True, blogger_url=post_url,
@@ -2873,11 +3133,14 @@ description=extract_pin_description(
         tumblr_ok=tumblr_ok, tiktok_ok=tiktok_ok,
     )
     print("Committing history + status...")
-    git_commit_and_push([HISTORY_FILE, STATUS_FILE], f"Auto post history: {draft['title']}")
+    commit_paths = [HISTORY_FILE, STATUS_FILE]
+    if os.path.exists(BING_BACKLOG_FILE):
+        commit_paths.append(BING_BACKLOG_FILE)
+    git_commit_and_push(commit_paths, f"Auto post history: {draft['title']}")
 
     def tick(ok):
         if ok is None:
-            return "➖ (video runs only)"
+            return "➖ off"
         return "✅" if ok else "❌"
 
     send_phone_notification(
