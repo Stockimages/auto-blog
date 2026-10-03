@@ -375,6 +375,10 @@ _TITLE_FILLER = {
     "cheap", "budget", "easy", "simple", "under", "from", "that", "one",
     "weekend", "hour", "hours", "step", "guide", "ideas", "idea", "real",
     "heres", "here", "spent", "only", "just", "about", "best", "way",
+    # seasonal / list-post words that many different posts legitimately share
+    "ways", "tips", "things", "mistakes", "hacks", "secrets", "decor", "decorating",
+    "home", "fall", "autumn", "cozy", "winter", "summer", "spring", "christmas",
+    "holiday", "holidays", "halloween", "thanksgiving", "easter", "season", "seasonal",
 }
 
 
@@ -405,14 +409,189 @@ def find_duplicate_title(title, history, threshold=0.5):
     return None
 
 
+# Phrases that claim a personal experience the blog doesn't actually have
+# (the posts use stock photos and the projects weren't done by the author).
+_EXPERIENCE_CLAIMS = re.compile(
+    r"\bI(?:'ve| have)? (?:tried|spent|made|bought|found|paid|painted|built|used|did|picked|"
+    r"grabbed|scored|snagged|tested|ended up|was skeptical|learned|started|decided|thought|hated|"
+    r"loved)\b"
+    r"|\b(?:my|our) (?:husband|wife|partner|kids|son|daughter|mom|dad|home|house|kitchen|"
+    r"apartment|garage|basement|porch|dresser|mantel|living room|bedroom|bathroom)\b"
+    r"|\bwhen I (?:made|built|did|tried|first)\b",
+    re.IGNORECASE,
+)
+
+
+def find_quality_problems(draft, min_words=600):
+    """
+    Returns a list of reasons this draft shouldn't be published (empty list =
+    fine). Prompts are only requests, so these are checked in code, the same
+    way duplicate topics are: (1) too thin to be useful, (2) claims of
+    personal experience that didn't happen.
+    """
+    body_text = re.sub(r"<[^>]+>", " ", draft.get("html", ""))
+    problems = []
+    words = len(body_text.split())
+    if words < min_words:
+        problems.append(f"too short ({words} words, minimum {min_words})")
+    for label, text in (("title", draft.get("title", "")), ("article", body_text)):
+        m = _EXPERIENCE_CLAIMS.search(text)
+        if m:
+            problems.append(f"claims a personal experience in the {label}: \"{m.group(0)}\"")
+            break
+    return problems
+
+
 TITLE_STYLES = [
     "RESULT-FIRST: lead with the transformation, e.g. \"This $9 Thrifted Lamp Now Looks Like a $300 Designer Piece\"",
     "QUESTION: a curious question the project answers, e.g. \"Can a $12 Thrifted Mirror Really Pass for Antique Brass?\"",
-    "FIRST PERSON: what you did and spent, e.g. \"I Spent $18 Turning a Thrift Store Find Into a Hanging Planter\"",
+    "COST-LED: lead with the budget, e.g. \"A Hanging Planter From a Thrifted Colander for Under $20\"",
     "PLAIN DIY: a clear search-friendly tutorial title, e.g. \"DIY Aged Brass Boot Tray From a Thrifted Metal Tray\"",
     "BEFORE-AND-AFTER: e.g. \"From Thrift Store Colander to Zinc Planter: A $18 Makeover\"",
     "BUDGET ANGLE: lead with the saving, e.g. \"A $20 Entryway Bench That Looks Like It Cost $400\"",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Content variety: every post gets a randomly-picked POST FORMAT (so the site
+# isn't 100 near-identical tutorials), a seasonal theme matching the time of
+# year (Pinterest users plan holidays weeks ahead) about 2 posts in 3, and
+# sometimes a decor-style "lens". The last few formats/themes used are
+# remembered in topics_history.json so the same one doesn't come up twice in
+# a row. NOTE: this uses a seasonal calendar, not live trend data.
+# ---------------------------------------------------------------------------
+POST_FORMATS = [
+    {"name": "project tutorial", "weight": 3, "use_title_styles": True,
+     "instruction": "A single start-to-finish thrift-flip or DIY project, explained step by step.",
+     "needs_list": True,
+     "table_hint": "a materials and cost breakdown with columns Item, Price"},
+    {"name": "listicle", "weight": 3, "use_title_styles": False,
+     "instruction": "A numbered list post of 5-9 ideas. Each idea gets its own h2/h3 with a concrete tip, a rough cost and why it works. NOT a single step-by-step project and NOT the 'turn X into Y' framing.",
+     "table_hint": "a summary table with columns Idea, Approx. cost, Time",
+     "title_hint": "number-led and specific, e.g. '7 Budget Ways to Make a Small Bedroom Feel Bigger'"},
+    {"name": "room refresh plan", "weight": 2, "use_title_styles": False,
+     "instruction": "A whole-room (or whole-area) refresh plan on a budget: what to change first, what to skip, and the order to do it in.",
+     "table_hint": "a shopping list with columns Item, Where to buy, Price",
+     "title_hint": "budget-led, e.g. 'A Cozy Living Room Refresh for Under $150'"},
+    {"name": "thrift buying guide", "weight": 2, "use_title_styles": False,
+     "instruction": "A guide to buying a type of item second-hand: what to look for, red flags, fair prices, where to find it.",
+     "table_hint": "a table with columns What to look for, Fair price, Red flags",
+     "title_hint": "practical, e.g. 'What to Look For When Thrifting a Solid Wood Dresser'"},
+    {"name": "mistakes and fixes", "weight": 2, "use_title_styles": False,
+     "instruction": "Common mistakes that make a room look cheap, cluttered or dated, each paired with a specific, inexpensive fix.",
+     "table_hint": "a table with columns Mistake, Quick fix, Cost",
+     "title_hint": "e.g. '6 Mistakes That Make Your Entryway Look Cluttered (and Cheap Fixes)'"},
+    {"name": "project walkthrough with pitfalls", "weight": 2, "use_title_styles": True, "needs_list": True,
+     "instruction": "A walkthrough of one makeover that is honest about what can go wrong: the common pitfalls at each step, how to avoid them, and what the finished result should look like. Written as a guide ('you'), NOT as a personal story.",
+     "table_hint": "a table of what you bought and what it cost, columns Item, Price"},
+    {"name": "designer look for less", "weight": 2, "use_title_styles": False,
+     "instruction": "Recreate a high-end look with budget or thrifted alternatives, comparing the pricey original to the budget version piece by piece.",
+     "table_hint": "a comparison table with columns Designer piece, Budget version, You save",
+     "title_hint": "e.g. 'The Designer Mantel Look for a Fraction of the Price'"},
+    {"name": "styling guide", "weight": 2, "use_title_styles": False,
+     "instruction": "How to style ONE spot (mantel, shelf, entry table, coffee table, nightstand, porch) in simple layers with easy rules a beginner can follow.",
+     "table_hint": "a table with columns Layer, What to use, Approx. cost",
+     "title_hint": "e.g. 'How to Style a Mantel in 4 Simple Layers'"},
+    {"name": "tested and myth-busting", "weight": 1, "use_title_styles": False,
+     "instruction": "Test a popular budget decor trick or product type (chalk paint, peel-and-stick, thrifted rugs, thrifted lamps) and report honestly what worked and what didn't.",
+     "table_hint": "a table with columns Method, Result, Verdict",
+     "title_hint": "a curious question or honest verdict, e.g. 'Does Peel-and-Stick Backsplash Really Last? What I Learned'"},
+]
+
+# month -> (themes for right now, themes for roughly the next 4-6 weeks).
+# US audience; holidays are planned ahead on Pinterest, so "upcoming" matters.
+SEASONAL_THEMES = {
+    1: (["New Year home reset and decluttering on a budget", "cozy winter warmth with textiles, candles and lighting", "small-space organization with thrifted baskets and shelves"],
+        ["Valentine's Day budget decor", "winter-to-spring refresh"]),
+    2: (["Valentine's Day budget decor and tablescapes", "cozy late-winter bedroom refresh"],
+        ["spring refresh decor", "Easter and spring table ideas", "St. Patrick's Day simple decor"]),
+    3: (["spring refresh on a budget", "spring decluttering and reset", "Easter table and decor ideas"],
+        ["Mother's Day gift and styling ideas", "porch and patio prep"]),
+    4: (["Easter and spring decor", "fresh spring porch and entryway", "Mother's Day DIY gifts from thrifted finds"],
+        ["patio and balcony setup", "Memorial Day and early-summer entertaining"]),
+    5: (["patio and balcony makeovers", "Memorial Day outdoor entertaining decor", "graduation and Mother's Day party decor"],
+        ["summer living room refresh", "4th of July decor"]),
+    6: (["summer porch and patio styling", "4th of July decor on a budget", "light, bright summer living room"],
+        ["dorm and back-to-school room ideas", "late-summer outdoor dining"]),
+    7: (["4th of July and summer entertaining", "dorm and college apartment decor on a budget", "light airy bedroom to beat the heat"],
+        ["early fall transition decor", "back-to-school organization"]),
+    8: (["dorm and first-apartment decor", "back-to-school organization nooks", "late-summer to fall transition styling"],
+        ["cozy fall decor", "fall porch and entryway"]),
+    9: (["cozy fall decor on a budget", "fall porch, entryway and mantel", "autumn tablescapes and candles"],
+        ["Halloween decor", "Thanksgiving table"]),
+    10: (["Halloween decor that looks expensive but isn't", "cozy fall living room and bedroom", "Thanksgiving table and hosting on a budget"],
+         ["Christmas and holiday decor", "DIY holiday gifts from thrifted finds"]),
+    11: (["Thanksgiving tablescapes and hosting", "Christmas decor on a budget", "DIY gifts from thrifted finds", "holiday entryway and mantel"],
+         ["Christmas tree and mantel styling", "New Year's party decor"]),
+    12: (["Christmas decor: trees, mantels and tablescapes", "last-minute DIY gifts", "New Year's Eve party decor", "cozy winter home"],
+         ["New Year home reset", "cozy winter warmth"]),
+}
+
+# Holiday themes are dropped once their date is too close to still help
+# (Google indexes slowly and Pinterest users plan weeks ahead). (month, day)
+# is the last day such a theme can still be picked. Easter moves each year,
+# so it has no cutoff here.
+THEME_EXPIRY = [
+    ("valentine", (2, 7)), ("st. patrick", (3, 10)), ("mother's day", (5, 5)),
+    ("memorial day", (5, 20)), ("4th of july", (7, 1)), ("halloween", (10, 8)),
+    ("thanksgiving", (11, 15)), ("christmas", (12, 15)),
+    ("new year's party", (12, 26)), ("new year's eve", (12, 26)),
+]
+
+
+def theme_expired(theme, today):
+    t = theme.lower()
+    return any(key in t and (today.month, today.day) > cutoff for key, cutoff in THEME_EXPIRY)
+
+
+STYLE_LENSES = [
+    "modern farmhouse", "japandi / warm minimalism", "boho", "mid-century modern",
+    "french country", "coastal", "cottagecore", "grandmillennial / vintage maximalist",
+    "industrial", "scandinavian", "rustic cabin", "eclectic",
+]
+
+
+def pick_post_plan(history, today=None):
+    """
+    Decides this post's format, seasonal theme and optional style lens.
+    Avoids repeating the last 3 formats and the last 8 themes.
+    """
+    today = today or datetime.now(timezone.utc)
+
+    recent_formats = {h.get("format") for h in history[-3:]}
+    pool = [f for f in POST_FORMATS if f["name"] not in recent_formats] or POST_FORMATS
+    fmt = random.choices(pool, weights=[f["weight"] for f in pool], k=1)[0]
+
+    theme = None
+    if random.random() < 0.65:  # ~2 posts in 3 follow the season; the rest are evergreen
+        now_themes, upcoming = SEASONAL_THEMES[today.month]
+        used = {h.get("theme") for h in history[-8:]}
+        live_now = [t for t in now_themes if not theme_expired(t, today)]
+        live_upcoming = [t for t in upcoming if not theme_expired(t, today)]
+        # Themes about events 4-8 weeks away are weighted higher: that's when
+        # people search for them, and when a new post still has time to rank.
+        weighted = live_now * 2 + live_upcoming * 3
+        candidates = [t for t in weighted if t not in used] or weighted or live_now + live_upcoming
+        theme = random.choice(candidates) if candidates else None
+
+    if theme:
+        season_line = (
+            f"SEASON / TIMING: today is {today.strftime('%B %d, %Y')}. Build this post around this "
+            f"seasonal theme: \"{theme}\". People plan these weeks ahead on Pinterest, so it "
+            f"should be useful right now. Make the season clear in the title and the content."
+        )
+    else:
+        season_line = (
+            "SEASON / TIMING: make this one an EVERGREEN post that works any time of year — "
+            "do not make it seasonal or holiday-themed."
+        )
+
+    style = random.choice(STYLE_LENSES) if random.random() < 0.5 else None
+    style_line = (
+        f"STYLE LENS (optional flavor): lean into {style} style where it fits naturally; "
+        f"don't force it." if style else ""
+    )
+    return {"fmt": fmt, "theme": theme, "season_line": season_line, "style_line": style_line}
 
 
 def generate_draft(history, niche):
@@ -436,6 +615,24 @@ def generate_draft(history, niche):
     # Titles had become samey ("How to Turn a $X Thrifted Y into a $Z ..."),
     # so each run is handed one randomly-picked title style to follow.
     title_style = random.choice(TITLE_STYLES)
+    plan = pick_post_plan(history)
+    fmt = plan["fmt"]
+    needs_line = (
+        "   Right after the hook, add <h2>What You'll Need</h2> with a short <ul> of the\n"
+        "   materials and tools, so readers can scan it before the steps.\n"
+        if fmt.get("needs_list") else ""
+    )
+    if fmt["use_title_styles"]:
+        title_line = (
+            f"TITLE STYLE for THIS post (the site's titles had become too similar to each\n"
+            f"other, so follow this one): {title_style}. Do NOT start the title with\n"
+            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W".'
+        )
+    else:
+        title_line = (
+            f"TITLE for THIS post: {fmt['title_hint']}. Do NOT start the title with\n"
+            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W".'
+        )
 
     # Count how many past posts fell in each fixed category so we can nudge
     # Gemini toward whichever categories are under-served, instead of every
@@ -448,20 +645,34 @@ def generate_draft(history, niche):
     categories_by_need = sorted(CATEGORIES, key=lambda c: category_counts[c])
     category_counts_str = ", ".join(f"{c}: {category_counts[c]}" for c in CATEGORIES)
 
-    prompt = f"""You are a real person who runs a {niche} blog and personally writes every
-post. You've done these projects yourself, in your own home, on a real budget.
+    prompt = f"""You are an experienced, down-to-earth writer for a {niche} blog. You know
+these projects well and explain them clearly, on a real budget.
 Posts are shared to Pinterest automatically the moment they're published, so
 the opening line has to earn a click — then the article has to actually
-deliver, like a friend explaining exactly how they did something.
+deliver, like a knowledgeable friend explaining exactly how it's done.
+
+HONESTY RULES (important):
+- Do NOT claim experiences that didn't happen: no "I tried", "I spent", "in my
+  home", "my husband", "when I made this". Speak to the reader ("you") or in
+  general terms ("most people find...", "a common mistake is...").
+- PRICES are estimates, never receipts. Use "about", "around", "under" or a
+  range ("$15-$25"); thrift prices vary by store and region. Never state an
+  inflated retail value as fact: say "looks like a piece that could cost $400"
+  or "similar pieces often sell for $300-$450". In titles prefer "under $20"
+  or "for about $20" over an exact figure.
 
 Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
 Pick ONE fresh, specific, practical angle on {niche} that is not in that list.
 
-TITLE STYLE for THIS post (the site's titles had become too similar to each
-other, so follow this one): {title_style}. Do NOT start the title with
-"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W".
+POST FORMAT for THIS post (required — the site was turning into many near-identical
+tutorials, so this post MUST follow this format): {fmt["name"].upper()}: {fmt["instruction"]}
+
+{plan["season_line"]}
+{plan["style_line"]}
+
+{title_line}
 
 CATEGORY (required): every post on this site is filed under exactly ONE of
 these fixed categories, which is also the site's navigation menu — pick
@@ -482,7 +693,7 @@ WRITING VOICE — this is the most important instruction:
 - Be specific and concrete everywhere: real product types, real store names when
   natural (Ikea, Home Depot, Target, thrift stores, Facebook Marketplace), real
   price ranges, real tools, real brand-agnostic techniques.
-- It's fine to have a mild personal opinion or aside ("I was skeptical about this one, but...").
+- A light, opinionated aside is fine ("honestly, skip this step if you're short on time") as long as it doesn't claim a personal experience.
 - NEVER use these overused AI-sounding words/phrases, in any form: {banned_list}.
 - No generic filler sentences that could apply to any home-decor post. Every
   paragraph must teach something specific or move the project forward.
@@ -501,13 +712,14 @@ quotes are the JSON string delimiter and will break the response.
 
 1. Opening hook paragraph (standalone, curiosity or a specific promise —
    this is what Pinterest/Google show as the preview).
+{needs_line}
 2. A few h2/h3 sections walking through the real project or tips, using
    <ul> for independent tips/ideas and <ol> for sequential step-by-step
    instructions — pick whichever actually fits each section.
-3. Include ONE real <table> somewhere natural in the article: a budget /
-   materials breakdown with columns like Item, Price. Use realistic prices
-   that add up to a sensible total, and mention the total in the text near
-   the table (e.g. "All in, this came out to about $X").
+3. Include ONE real <table> somewhere natural in the article: {fmt["table_hint"]}.
+   Use realistic prices wherever prices appear, and mention the total or a
+   typical budget in the text near the table (e.g. "All in, this came out
+   to about $X").
 4. INTERNAL LINKS: here are {len(linkable)} of our own previously published
    posts (title + real URL): {linkable_json}
    If (and only if) 1-3 of them are genuinely relevant to THIS article's
@@ -524,7 +736,10 @@ quotes are the JSON string delimiter and will break the response.
    table, e.g. "$26"), time_estimate (e.g. "1 hour", "A weekend"), and
    difficulty ("Easy", "Moderate", or "Advanced") — used for a quick-take
    summary box at the top of the post. All three MUST be plain strings
-   (e.g. "$26", not 26; not a list).
+   (e.g. "$26", not 26; not a list). If this post is NOT a single project
+   (a list, guide or plan), total_cost is the typical total budget to do
+   everything in the post (a range like "$30-$60" is fine), time_estimate is
+   how long it would take, and difficulty is how hard the whole thing is.
 
 7. FAQ: write exactly 3 short, genuinely specific reader questions about
    THIS project (not generic decor questions) with concise 1-2 sentence
@@ -544,6 +759,11 @@ quotes are the JSON string delimiter and will break the response.
    ]
 
 Also write:
+- "pin_description": 2-3 plain sentences (max 300 characters) written for
+  Pinterest SEARCH: say plainly what this post is, who it's for, and the
+  room / style / budget, using the natural keywords people actually search
+  (e.g. "budget living room ideas", "thrift store makeover"). No hashtags, no
+  emoji, no quotation marks, no personal-experience claims.
 - "pin_hook": a punchy, benefit- or curiosity-driven phrase, 5-8 words max,
   written like Pinterest pin text (e.g. "10 Thrift Flips That Look Expensive"),
   NOT a full sentence, no ending punctuation.
@@ -567,16 +787,18 @@ Also write:
   call-to-action or "link"/"website"/"bio" line (that's added separately).
   Structure:
   1. A punchy 1-sentence hook that would make someone stop scrolling — lean
-     hard into the price-transformation shock or a specific, concrete
+     hard into the most specific, surprising claim of THIS post: the
+     price-transformation shock for a project, or a concrete number,
+     mistake or result for a list/guide post — a specific, concrete
      curiosity gap (what it actually is, not "you won't believe this").
      Specific and unexpected beats generic every time: "This $9 thrift-store
-     lazy Susan is now a $380 stone counter riser" beats "I made an amazing
+     lazy Susan looks like a $380 stone counter riser" beats "I made an amazing
      upgrade for cheap."
   2. 2 short, concrete tip/step sentences pulled from the real project — the
      single most surprising or useful specific detail (the trick, the
      material swap, the exact technique), not a generic summary. In ONE of
      these, naturally mention the total cost and time using the actual
-     numbers (e.g. "It only took about an hour and cost me $20.") — write
+     numbers (e.g. "It only takes about an hour and costs around $20.") — write
      dollar amounts as "$20" (not spelled out); the TTS voice reads these
      correctly, and it lets the on-screen caption highlight the price.
   Write it like natural spoken American English: short punchy sentences,
@@ -588,6 +810,7 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
 {{
   "title": "a specific, honest, clickable title. Plain text only — no emoji (this is an SEO title indexed by Google, and keyword clarity matters more than decoration there)",
   "category": "EXACTLY one of the fixed categories listed above",
+  "pin_description": "...",
   "pin_hook": "...",
   "hashtag_tags": ["8-12 short descriptive style/content tags for social hashtags only (Instagram/Facebook use more of these than Pinterest does), e.g. thrift flip, diy, budget decor, home makeover, thrifted finds — these do NOT affect the site's category"],
   "total_cost": "e.g. $26",
@@ -662,7 +885,11 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                     text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
                     text = text.replace("```json", "").replace("```", "").strip()
                     try:
-                        return json.loads(text)
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict):
+                            parsed["_format"] = fmt["name"]
+                            parsed["_theme"] = plan["theme"]
+                        return parsed
                     except json.JSONDecodeError as e:
                         last_error = f"invalid JSON: {e}"
                         if is_last_attempt_for_model and is_final_attempt_ever:
@@ -731,6 +958,11 @@ def normalize_draft(draft):
     if not draft.get("pin_hook"):
         warn("pin_hook", "the title")
         draft["pin_hook"] = draft["title"]
+
+    # Optional: Pinterest-search description. If missing/malformed, the old
+    # behavior (excerpt of the opening paragraph) is used instead.
+    if not isinstance(draft.get("pin_description"), str):
+        draft["pin_description"] = ""
 
     if not draft.get("image_prompt"):
         warn("image_prompt", "the title as the search query")
@@ -1557,7 +1789,7 @@ def build_pin_hashtags(labels, max_tags=5):
     return " ".join(tags)
 
 
-def extract_pin_description(html, hashtags="", max_length=500, cta=""):
+def extract_pin_description(html, hashtags="", max_length=500, cta="", override=None):
     """
     Pulls plain text from the article's opening <p> (the hook paragraph)
     to use as the Pinterest/Facebook/Instagram description — a genuine
@@ -1568,8 +1800,11 @@ def extract_pin_description(html, hashtags="", max_length=500, cta=""):
     here too for consistency), then hashtags (if provided) — all within
     the length limit.
     """
-    match = re.search(r"<p>(.*?)</p>", html, re.IGNORECASE | re.DOTALL)
-    text = match.group(1) if match else html
+    if override and override.strip():
+        text = override
+    else:
+        match = re.search(r"<p>(.*?)</p>", html, re.IGNORECASE | re.DOTALL)
+        text = match.group(1) if match else html
     text = re.sub(r"<[^>]+>", "", text)  # strip any remaining HTML tags
     text = re.sub(r"\s+", " ", text).strip()
 
@@ -2507,15 +2742,21 @@ def main():
         for attempt in range(1, MAX_TOPIC_ATTEMPTS + 1):
             draft = normalize_draft(generate_draft(prompt_history, niche))
             duplicate_of = find_duplicate_title(draft["title"], history)
-            if duplicate_of is None:
+            quality_problems = find_quality_problems(draft)
+            if duplicate_of is None and not quality_problems:
                 break
-            print(f"Topic '{draft['title']}' is too similar to existing post "
-                  f"'{duplicate_of}' (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}) — asking for a different one.")
-            prompt_history = prompt_history + [{"title": draft["title"]}]
+            if duplicate_of is not None:
+                print(f"Topic '{draft['title']}' is too similar to existing post "
+                      f"'{duplicate_of}' (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}) — asking for a different one.")
+                prompt_history = prompt_history + [{"title": draft["title"]}]
+            else:
+                print(f"Draft '{draft['title']}' rejected (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}): "
+                      f"{'; '.join(quality_problems)} — asking again.")
         else:
             raise RuntimeError(
-                f"Could not get a non-duplicate topic after {MAX_TOPIC_ATTEMPTS} attempts "
-                f"(last: '{draft['title']}'). Nothing was published this run."
+                f"Could not get an acceptable draft after {MAX_TOPIC_ATTEMPTS} attempts "
+                f"(last: '{draft['title']}' — {duplicate_of and 'duplicate topic' or '; '.join(quality_problems)}). "
+                f"Nothing was published this run."
             )
         print("Topic chosen:", draft["title"])
 
@@ -2840,6 +3081,15 @@ def main():
         # Remove any leftover placeholders Gemini added without a matching section_images entry.
         body_html = re.sub(r"\[\[IMG_\d+\]\]", "", body_html)
 
+        # Prices in the article are estimates, so say so right under the first
+        # table (done here in code, not in the prompt, so it's never skipped).
+        if "estimates and vary" not in body_html:
+            body_html = body_html.replace(
+                "</table>",
+                "</table><p><em>Prices are estimates and vary by store and region.</em></p>",
+                1,
+            )
+
         # --- Quick-take summary box (cost/time/difficulty/reading time) ---
         quick_take_html = (
             '<div style="background:#f7f3ee;border-left:4px solid #b08d57;'
@@ -3022,7 +3272,7 @@ def main():
         category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
         fb_message = (
             f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
-            f"👉 Visit our website for the full step-by-step guide!\n\n{social_hashtags}"
+            f"👉 Visit our website for the full guide!\n\n{social_hashtags}"
         )
         facebook_ok = post_facebook_video(fb_message, reel_video_url, post_url)
 
@@ -3044,7 +3294,7 @@ def main():
         category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
         fb_message = (
             f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
-            f"👉 Visit our website for the full step-by-step guide!\n\n{social_hashtags}"
+            f"👉 Visit our website for the full guide!\n\n{social_hashtags}"
         )
         facebook_ok = post_to_facebook_page(fb_message, ig_image_url, post_url)
 
@@ -3059,6 +3309,8 @@ def main():
     history.append({
         "title": draft["title"],
         "category": draft.get("category"),
+        "format": draft.get("_format"),
+        "theme": draft.get("_theme"),
         "date": datetime.now(timezone.utc).isoformat(),
         "url": post_url,
         "photo_ids": this_run_photo_ids,
@@ -3079,8 +3331,8 @@ def main():
                 board_id=board_id,
                 title=draft["title"],
                 description=extract_pin_description(
-                    draft["html"], hashtags=pin_hashtags,
-                    cta="👉 Visit our website for the full step-by-step guide!",
+                    draft["html"], hashtags=pin_hashtags, override=draft.get("pin_description"),
+                    cta="👉 Visit our website for the full guide!",
                 ),
                 link=post_url,
                 video_bytes=pinterest_video_bytes,
@@ -3092,8 +3344,8 @@ def main():
                 board_id=board_id,
                 title=draft["title"],
 description=extract_pin_description(
-                    draft["html"], hashtags=pin_hashtags,
-                    cta="👉 Visit our website for the full step-by-step guide!",
+                    draft["html"], hashtags=pin_hashtags, override=draft.get("pin_description"),
+                    cta="👉 Visit our website for the full guide!",
                 ),
                 link=post_url,
                 image_url=hero_url,
