@@ -44,6 +44,9 @@ jobs:
       - name: Generate article + image/video and publish to Blogger + Pinterest
         env:
           RUN_TYPE: ${{ inputs.run_type }}
+          ENABLE_META: ${{ vars.ENABLE_META }}
+          ENABLE_TIKTOK: ${{ vars.ENABLE_TIKTOK }}
+          ENABLE_GOOGLE_INDEXING: ${{ vars.ENABLE_GOOGLE_INDEXING }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
