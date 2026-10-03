@@ -76,6 +76,14 @@ PINTEREST_APP_SECRET = os.environ["PINTEREST_APP_SECRET"]
 PINTEREST_REFRESH_TOKEN = os.environ["PINTEREST_REFRESH_TOKEN"]
 PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
 
+# TikTok — auto-posts the 9:16 video on RUN_TYPE=video runs. The access token
+# only lasts 24h, so every run exchanges TIKTOK_REFRESH_TOKEN for a fresh one;
+# if TikTok rotates the refresh token, it's saved back to the GitHub secret
+# automatically (same mechanism as Pinterest) — no manual steps.
+TIKTOK_CLIENT_KEY = os.environ.get("TIKTOK_CLIENT_KEY")
+TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
+TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
+
 # Facebook Page — auto-posts a link to the Page right after each Blogger post.
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
@@ -1588,6 +1596,143 @@ def create_pinterest_video_pin(access_token, board_id, title, description, link,
     return pin_res.json()
 
 
+def get_tiktok_access_token():
+    """
+    Exchanges the stored TikTok refresh token for a fresh 24h access token.
+    If TikTok returns a different refresh_token, the GitHub secret is updated
+    automatically so the chain never breaks. Raises on failure (caller wraps).
+    """
+    res = robust_request(
+        "POST", "https://open.tiktokapis.com/v2/oauth/token/",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={
+            "client_key": TIKTOK_CLIENT_KEY,
+            "client_secret": TIKTOK_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+            "refresh_token": TIKTOK_REFRESH_TOKEN,
+        },
+        timeout=30,
+    )
+    data = res.json() if res.content else {}
+    if not res.ok or "access_token" not in data:
+        raise RuntimeError(f"Could not refresh TikTok access token ({res.status_code}): {res.text}")
+
+    new_refresh = data.get("refresh_token")
+    if new_refresh and new_refresh != TIKTOK_REFRESH_TOKEN:
+        print("TikTok issued a new refresh_token — updating GitHub secret...")
+        update_github_secret("TIKTOK_REFRESH_TOKEN", new_refresh)
+    return data["access_token"]
+
+
+def post_to_tiktok(video_path, caption):
+    """
+    Publishes the local 9:16 video to TikTok via the Content Posting API
+    (Direct Post, FILE_UPLOAD). Used only for RUN_TYPE=video runs.
+    Never raises — returns True/False so a TikTok problem can never fail
+    the run (the blog post and other platforms are already done).
+    """
+    if not (TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET and TIKTOK_REFRESH_TOKEN):
+        print("TIKTOK_* secrets not set — skipping TikTok post.")
+        return False
+    if not video_path or not os.path.exists(video_path):
+        print("No local video file available — skipping TikTok post.")
+        return False
+    try:
+        access_token = get_tiktok_access_token()
+        auth_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+        }
+
+        # 1) Ask TikTok which privacy levels this account may post with.
+        creator_res = robust_request(
+            "POST", "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+            headers=auth_headers, timeout=30,
+        )
+        if not creator_res.ok:
+            print(f"TikTok creator_info failed ({creator_res.status_code}): {creator_res.text}")
+            return False
+        options = creator_res.json().get("data", {}).get("privacy_level_options", [])
+        if "PUBLIC_TO_EVERYONE" in options:
+            privacy = "PUBLIC_TO_EVERYONE"
+        elif options:
+            privacy = options[0]
+            print(f"WARNING: PUBLIC_TO_EVERYONE not allowed for this account — "
+                  f"posting as {privacy}. (Is @decorvibeofficial set to Public?)")
+        else:
+            print("TikTok returned no privacy options — cannot post.")
+            return False
+
+        # 2) Init the upload (single chunk — our videos are a few MB).
+        with open(video_path, "rb") as f:
+            video_bytes = f.read()
+        size = len(video_bytes)
+
+        init_res = robust_request(
+            "POST", "https://open.tiktokapis.com/v2/post/publish/video/init/",
+            headers=auth_headers,
+            json={
+                "post_info": {
+                    "title": caption[:2200],
+                    "privacy_level": privacy,
+                    "disable_duet": False,
+                    "disable_comment": False,
+                    "disable_stitch": False,
+                },
+                "source_info": {
+                    "source": "FILE_UPLOAD",
+                    "video_size": size,
+                    "chunk_size": size,
+                    "total_chunk_count": 1,
+                },
+            },
+            timeout=60,
+        )
+        init_json = init_res.json() if init_res.content else {}
+        if not init_res.ok or init_json.get("error", {}).get("code") not in (None, "ok"):
+            print(f"TikTok init failed ({init_res.status_code}): {init_res.text}")
+            return False
+        publish_id = init_json["data"]["publish_id"]
+        upload_url = init_json["data"]["upload_url"]
+
+        # 3) Upload the bytes.
+        up_res = requests.put(
+            upload_url,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Length": str(size),
+                "Content-Range": f"bytes 0-{size - 1}/{size}",
+            },
+            data=video_bytes,
+            timeout=180,
+        )
+        if up_res.status_code not in (200, 201, 206):
+            print(f"TikTok upload failed ({up_res.status_code}): {up_res.text}")
+            return False
+
+        # 4) Poll until TikTok finishes processing/publishing.
+        for attempt in range(20):
+            time.sleep(6)
+            st_res = robust_request(
+                "POST", "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
+                headers=auth_headers, json={"publish_id": publish_id}, timeout=30,
+            )
+            st = st_res.json().get("data", {}) if st_res.ok else {}
+            status = st.get("status")
+            print(f"TikTok publish status (attempt {attempt + 1}/20): {status}")
+            if status == "PUBLISH_COMPLETE":
+                print("Posted to TikTok:", publish_id)
+                return True
+            if status == "FAILED":
+                print(f"TikTok publish failed: {st.get('fail_reason')}")
+                return False
+        print("TikTok publish still processing after timeout — treating as not confirmed.")
+        return False
+    except Exception as e:
+        print(f"TikTok post failed (blog post is still published fine): {e}")
+        return False
+
+
 def submit_url_for_indexing(url):
     """
     Tell Google to (re)crawl this URL now, via the Indexing API, using the
@@ -2090,7 +2235,7 @@ def send_phone_notification(subject, body):
         print(f"Could not send phone notification (non-fatal): {e}")
 
 
-def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok, tumblr_ok=False):
+def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok, tumblr_ok=False, tiktok_ok=None):
     """
     Writes a small status.json the control panel reads to show a simple
     green-tick/red-cross per platform for the most recent run, with when
@@ -2103,6 +2248,7 @@ def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok
         "pinterest": {"success": pinterest_ok, "timestamp": now},
         "instagram": {"success": instagram_ok, "timestamp": now},
         "tumblr": {"success": tumblr_ok, "timestamp": now},
+        "tiktok": {"success": tiktok_ok, "timestamp": now},  # None = not attempted (image run)
     }
     with open(STATUS_FILE, "w") as f:
         json.dump(status, f, indent=2)
@@ -2714,15 +2860,24 @@ description=extract_pin_description(
         hashtags=social_hashtags,
     )
 
+    # TikTok: video runs only (None = not attempted, shown as "skipped").
+    tiktok_ok = None
+    if RUN_TYPE == "video":
+        print("Posting to TikTok...")
+        tiktok_caption = f"{pin_hook}\n\n{draft['title']}\n\nFull guide on our website 🔗\n\n{pin_hashtags}"
+        tiktok_ok = post_to_tiktok(reel_video_filepath, tiktok_caption)
+
     save_status(
         blogger_ok=True, blogger_url=post_url,
         facebook_ok=facebook_ok, pinterest_ok=pinterest_ok, instagram_ok=instagram_ok,
-        tumblr_ok=tumblr_ok,
+        tumblr_ok=tumblr_ok, tiktok_ok=tiktok_ok,
     )
     print("Committing history + status...")
     git_commit_and_push([HISTORY_FILE, STATUS_FILE], f"Auto post history: {draft['title']}")
 
     def tick(ok):
+        if ok is None:
+            return "➖ (video runs only)"
         return "✅" if ok else "❌"
 
     send_phone_notification(
@@ -2732,7 +2887,8 @@ description=extract_pin_description(
         f"Facebook: {tick(facebook_ok)}\n"
         f"Instagram: {tick(instagram_ok)}\n"
         f"Pinterest: {tick(pinterest_ok)}\n"
-        f"Tumblr: {tick(tumblr_ok)}",
+        f"Tumblr: {tick(tumblr_ok)}\n"
+        f"TikTok: {tick(tiktok_ok)}",
     )
 
     # Clean up everything in R2 that was only ever needed to get through
