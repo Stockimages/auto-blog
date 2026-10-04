@@ -1084,9 +1084,19 @@ _QUERY_STYLE_WORDS = {
     "styled", "cozy", "rustic", "close", "closeup", "up", "warm", "light", "lighting",
     "vignette", "aesthetic", "modern", "vintage", "diy", "decor", "home", "interior",
     "budget", "thrifted", "thrift", "idea", "ideas", "photo", "image", "style",
+    # colours / finishes: "matte black" matched a black car's description
+    "matte", "black", "white", "dark", "gold", "golden", "silver", "moody", "soft",
+    "bright", "natural", "minimalist", "boho", "farmhouse", "glossy", "shiny",
 }
 
-VISION_CHECKS_PER_RUN = 10      # cap on Gemini photo-check calls per run (free-tier friendly)
+# Photos whose description mentions these are obviously not home decor.
+_OFFTOPIC_WORDS = {
+    "car", "cars", "vehicle", "vehicles", "suv", "truck", "trucks", "tesla", "motorcycle",
+    "motorbike", "bicycle", "airplane", "aircraft", "highway", "traffic", "laptop",
+    "smartphone", "runway", "makeup", "wedding", "sports", "football", "soccer",
+}
+
+VISION_CHECKS_PER_RUN = 24      # cap on Gemini photo-check calls per run (a video run makes ~15)
 _vision_state = {"used": 0, "disabled": False}
 
 
@@ -1096,6 +1106,11 @@ _PEOPLE_WORDS = {
     "mother", "father", "bride", "groom", "friends", "teen", "toddler", "selfie", "face",
     "faces", "male", "female", "santa", "wearing",
 }
+
+
+def _photo_is_offtopic(photo):
+    alt = set(re.findall(r"[a-z]+", (photo.get("alt") or "").lower()))
+    return bool(alt & _OFFTOPIC_WORDS)
 
 
 def _photo_has_people(photo):
@@ -1171,7 +1186,7 @@ def _gemini_pick_best_photo(query, photos):
         return None
 
 
-def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, _retry=False):
+def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, strict=False, _stage=0):
     """
     Finds a Pexels photo matching `query` and returns (image_bytes, photo_id).
 
@@ -1184,9 +1199,13 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
       3. Rank what's left by how well each photo's description matches the
          query's subject words (Pexels order breaks ties).
       4. Show the top 5 as thumbnails to Gemini and use the one it says
-         matches. If it says none fit, retry once with a shorter query. If
+         matches. If it says none fit, retry with the query's first three
+         subject words, then with a generic "home interior decor" query. If
          Gemini can't be reached, take one of the best-ranked by description
-         instead. The run never fails because of the photo check.
+         instead. If even the generic query is rejected: with strict=True
+         (section/reel photos) raise, so that image is skipped rather than
+         filled with an unrelated photo; with strict=False (the hero, which
+         is required) use the best description match.
     """
     used_photo_ids = used_photo_ids or set()
 
@@ -1240,6 +1259,10 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     without_people = [p for p in pool if not _photo_has_people(p)]
     if without_people:
         pool = without_people
+    # ...and any whose description is plainly not home decor (cars, laptops...)
+    on_topic = [p for p in pool if not _photo_is_offtopic(p)]
+    if on_topic:
+        pool = on_topic
 
     words = _query_words(query)
     order = {p["id"]: i for i, p in enumerate(photos)}          # Pexels' own relevance order
@@ -1252,10 +1275,15 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
         photo = verdict
         print(f"Photo check: Gemini picked a match for '{query}'.")
     elif verdict is False:
-        if not _retry and len(words) > 3:
+        if _stage == 0 and len(words) > 3:
             shorter = " ".join(words[:3])
             print(f"Photo check: none of the photos fit '{query}' — retrying with '{shorter}'.")
-            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, _retry=True)
+            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, strict, _stage=1)
+        if _stage <= 1:
+            print(f"Photo check: none fit '{query}' — trying a generic home-decor photo instead.")
+            return search_pexels_image("home interior decor", orientation, used_photo_ids, target_ratio, strict, _stage=2)
+        if strict:
+            raise RuntimeError(f"No suitable photo found for '{query}' (every candidate was rejected)")
         print(f"Photo check: none fit '{query}' — using the best description match.")
     if photo is None:
         best_score = _photo_match_score(ranked[0], words)
@@ -3089,7 +3117,7 @@ def main():
             print(f"Finding section photo for {token}: {query}")
             try:
                 raw_section, section_photo_id = search_pexels_image(
-                    query, orientation="landscape", used_photo_ids=used_photo_ids
+                    query, orientation="landscape", used_photo_ids=used_photo_ids, strict=True
                 )
                 this_run_photo_ids.append(section_photo_id)
                 used_photo_ids.add(section_photo_id)
@@ -3164,7 +3192,7 @@ def main():
                 try:
                     raw_bytes, photo_id = search_pexels_image(
                         query, orientation="portrait", used_photo_ids=used_photo_ids,
-                        target_ratio=9 / 16,
+                        target_ratio=9 / 16, strict=True,
                     )
                     real_image_bytes.append(raw_bytes)
                     this_run_photo_ids.append(photo_id)
@@ -3360,9 +3388,9 @@ def main():
         author_bio_html = (
             '<div style="margin-top:30px;padding-top:20px;border-top:1px solid #ddd;'
             'font-size:0.9em;color:#555;"><strong>About the Author:</strong> '
-            "Written by the DecorVibe team — real budget home-decor flips and "
-            "thrifted finds, tested and written up so you can recreate them "
-            "affordably.</div>"
+            "Written by the DecorVibe team — budget home-decor ideas and "
+            "thrift-store makeovers, researched and written up so you can "
+            "recreate them affordably.</div>"
         )
 
         # --- Article/BlogPosting schema (JSON-LD) — separate from the FAQ
