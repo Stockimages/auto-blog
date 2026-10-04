@@ -422,6 +422,30 @@ _EXPERIENCE_CLAIMS = re.compile(
 )
 
 
+_BRAND_NAMES = [
+    # high-end / designer retailers
+    "anthropologie", "studio mcgee", "mcgee & co", "mcgee and co", "west elm", "pottery barn",
+    "restoration hardware", "crate & barrel", "crate and barrel", "cb2", "williams sonoma",
+    "williams-sonoma", "ballard designs", "serena & lily", "serena and lily", "ethan allen",
+    "lulu and georgia", "arhaus", "rh modern",
+    # mainstream stores, marketplaces and thrift chains
+    "ikea", "walmart", "amazon", "etsy", "ebay", "wayfair", "home depot", "lowe's", "lowes",
+    "michaels", "hobby lobby", "dollar tree", "dollar general", "goodwill", "salvation army",
+    "habitat for humanity", "homegoods", "home goods", "tj maxx", "tjmaxx", "marshalls",
+    "costco", "world market", "kirkland's", "bed bath & beyond", "joann", "pier 1",
+    "facebook marketplace", "craigslist", "offerup", "poshmark",
+    # branded craft / paint / tool products
+    "mod podge", "rust-oleum", "rustoleum", "krylon", "annie sloan", "behr", "sherwin-williams",
+    "sherwin williams", "benjamin moore", "valspar", "minwax", "varathane", "dremel", "cricut",
+    "sharpie", "velcro", "gorilla glue", "elmer's", "e6000", "dixie belle", "general finishes",
+    "command strips", "command hooks", "command hook",
+]
+_BRAND_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(b) for b in sorted(_BRAND_NAMES, key=len, reverse=True)) + r")(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
 def find_quality_problems(draft, min_words=600):
     """
     Returns a list of reasons this draft shouldn't be published (empty list =
@@ -439,6 +463,16 @@ def find_quality_problems(draft, min_words=600):
         if m:
             problems.append(f"claims a personal experience in the {label}: \"{m.group(0)}\"")
             break
+
+    # Brand / retailer / product names (a post naming real brands with prices
+    # was unpublished by Blogger). Checked everywhere text can end up public.
+    searchable = " ".join([
+        draft.get("title", ""), body_text, draft.get("pin_hook", "") or "",
+        draft.get("pin_description", "") or "", json.dumps(draft.get("faq", []), ensure_ascii=False),
+    ])
+    brand = _BRAND_RE.search(searchable)
+    if brand:
+        problems.append(f"names a brand/store/product: \"{brand.group(0)}\"")
     return problems
 
 
@@ -485,8 +519,8 @@ POST_FORMATS = [
      "instruction": "A walkthrough of one makeover that is honest about what can go wrong: the common pitfalls at each step, how to avoid them, and what the finished result should look like. Written as a guide ('you'), NOT as a personal story.",
      "table_hint": "a table of what you bought and what it cost, columns Item, Price"},
     {"name": "designer look for less", "weight": 2, "use_title_styles": False,
-     "instruction": "Recreate a high-end look with budget or thrifted alternatives, comparing the pricey original to the budget version piece by piece.",
-     "table_hint": "a comparison table with columns Designer piece, Budget version, You save",
+     "instruction": "Recreate a high-end look with budget or thrifted alternatives. Describe the pricey version in general terms (never name a brand, store or product) and compare it to the budget version piece by piece.",
+     "table_hint": "a comparison table with columns High-end version (described, not named), Budget version, Typical savings (a range)",
      "title_hint": "e.g. 'The Designer Mantel Look for a Fraction of the Price'"},
     {"name": "styling guide", "weight": 2, "use_title_styles": False,
      "instruction": "How to style ONE spot (mantel, shelf, entry table, coffee table, nightstand, porch) in simple layers with easy rules a beginner can follow.",
@@ -544,6 +578,13 @@ def theme_expired(theme, today):
     return any(key in t and (today.month, today.day) > cutoff for key, cutoff in THEME_EXPIRY)
 
 
+# Share of posts that follow the season, by month: highest in Oct-Dec, when
+# Pinterest holiday searches (and ad rates, generally) peak; lower in the rest
+# of the year so more evergreen posts build up for Google over time.
+SEASONAL_SHARE = {1: 0.45, 2: 0.50, 3: 0.50, 4: 0.50, 5: 0.50, 6: 0.50,
+                  7: 0.55, 8: 0.60, 9: 0.65, 10: 0.70, 11: 0.70, 12: 0.70}
+
+
 STYLE_LENSES = [
     "modern farmhouse", "japandi / warm minimalism", "boho", "mid-century modern",
     "french country", "coastal", "cottagecore", "grandmillennial / vintage maximalist",
@@ -563,7 +604,7 @@ def pick_post_plan(history, today=None):
     fmt = random.choices(pool, weights=[f["weight"] for f in pool], k=1)[0]
 
     theme = None
-    if random.random() < 0.65:  # ~2 posts in 3 follow the season; the rest are evergreen
+    if random.random() < SEASONAL_SHARE.get(today.month, 0.6):  # the rest are evergreen
         now_themes, upcoming = SEASONAL_THEMES[today.month]
         used = {h.get("theme") for h in history[-8:]}
         live_now = [t for t in now_themes if not theme_expired(t, today)]
@@ -651,6 +692,17 @@ Posts are shared to Pinterest automatically the moment they're published, so
 the opening line has to earn a click — then the article has to actually
 deliver, like a knowledgeable friend explaining exactly how it's done.
 
+NO BRANDS (important — a post with brand names was removed by Blogger):
+- Never name any brand, retailer, store, marketplace, designer or branded
+  product: no IKEA, Target, Walmart, Amazon, Etsy, Goodwill, Home Depot,
+  Anthropologie, West Elm, Pottery Barn, Mod Podge, Rust-Oleum, Command hooks,
+  paint brands, and so on. Use generic words instead: "a thrift store", "a
+  big-box store", "a high-end retailer", "an online marketplace", "chalk
+  paint", "spray paint", "adhesive hooks", "decoupage glue".
+- Never quote a specific real product or its price. When comparing to an
+  expensive look, DESCRIBE the pricey version in general terms and give
+  price ranges ("similar pieces often cost $150-$250"), never a named item.
+
 HONESTY RULES (important):
 - Do NOT claim experiences that didn't happen: no "I tried", "I spent", "in my
   home", "my husband", "when I made this". Speak to the reader ("you") or in
@@ -690,9 +742,9 @@ use "General Decor".
 WRITING VOICE — this is the most important instruction:
 - Write like a real person talking to a friend, not like a content mill.
 - Vary sentence length. Short punchy sentences next to longer ones. Use contractions.
-- Be specific and concrete everywhere: real product types, real store names when
-  natural (Ikea, Home Depot, Target, thrift stores, Facebook Marketplace), real
-  price ranges, real tools, real brand-agnostic techniques.
+- Be specific and concrete everywhere: real product TYPES, generic places to shop
+  ("a thrift store", "a big-box store", "a home improvement store", "an online
+  marketplace"), real price ranges, real tools, brand-agnostic techniques.
 - A light, opinionated aside is fine ("honestly, skip this step if you're short on time") as long as it doesn't claim a personal experience.
 - NEVER use these overused AI-sounding words/phrases, in any form: {banned_list}.
 - No generic filler sentences that could apply to any home-decor post. Every
@@ -1022,26 +1074,115 @@ def normalize_draft(draft):
     return draft
 
 
-def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None):
+# Words in a Pexels query that describe the *look* rather than the subject;
+# they're ignored when matching a photo's description to the query.
+_QUERY_STYLE_WORDS = {
+    "styled", "cozy", "rustic", "close", "closeup", "up", "warm", "light", "lighting",
+    "vignette", "aesthetic", "modern", "vintage", "diy", "decor", "home", "interior",
+    "budget", "thrifted", "thrift", "idea", "ideas", "photo", "image", "style",
+}
+
+VISION_CHECKS_PER_RUN = 10      # cap on Gemini photo-check calls per run (free-tier friendly)
+_vision_state = {"used": 0, "disabled": False}
+
+
+_PEOPLE_WORDS = {
+    "woman", "women", "man", "men", "girl", "boy", "person", "people", "child", "children",
+    "kid", "kids", "baby", "couple", "family", "portrait", "smiling", "model", "lady", "guy",
+    "mother", "father", "bride", "groom", "friends", "teen", "toddler", "selfie", "face",
+    "faces", "male", "female", "santa", "wearing",
+}
+
+
+def _photo_has_people(photo):
+    alt = set(re.findall(r"[a-z]+", (photo.get("alt") or "").lower()))
+    return bool(alt & _PEOPLE_WORDS)
+
+
+def _query_words(text):
+    return [w for w in re.findall(r"[a-z]+", text.lower()) if len(w) > 2 and w not in _QUERY_STYLE_WORDS]
+
+
+def _photo_match_score(photo, words):
+    """How many of the query's subject words appear in the photo's description."""
+    alt = set(re.findall(r"[a-z]+", (photo.get("alt") or "").lower()))
+    return sum(1 for w in words if w in alt)
+
+
+def _gemini_pick_best_photo(query, photos):
     """
-    Finds a Pexels photo matching `query`. If `used_photo_ids` is given,
-    photos we've already used in previous posts are skipped — two posts
-    with similar queries would otherwise land on the exact same photo,
-    which looks like duplicate spam on Pinterest in particular. Falls back
-    to the full result set if every match has already been used, so a run
-    never fails just because a query's results are exhausted.
+    Shows up to 5 small thumbnails to Gemini and asks which one genuinely
+    matches `query`. Returns the chosen photo, 0-based, or:
+      None  -> couldn't check (quota/network/bad answer); caller falls back
+      False -> Gemini says none of them fit
+    Never raises.
+    """
+    if _vision_state["disabled"] or _vision_state["used"] >= VISION_CHECKS_PER_RUN:
+        return None
+    try:
+        parts = [{"text": (
+            f"You are choosing a photo for a budget home-decor blog. The photo should clearly "
+            f"show: \"{query}\". Below are {len(photos)} candidate photos, numbered in order. "
+            f"Pick the ONE that best matches those keywords and looks like a clean, real interior "
+            f"or decor photo (not mostly text or graphics). REJECT any photo where a person or a "
+            f"face is visible. If none of them genuinely fit, answer 0. "
+            f"Reply with ONLY JSON like {{\"best\": 2}}."
+        )}]
+        for i, p in enumerate(photos, start=1):
+            thumb = robust_request("GET", p["src"].get("medium") or p["src"]["small"], timeout=30)
+            if not thumb.ok:
+                return None
+            parts.append({"text": f"Photo {i}:"})
+            parts.append({"inline_data": {"mime_type": "image/jpeg",
+                                          "data": base64.b64encode(thumb.content).decode()}})
+        _vision_state["used"] += 1
 
-    `orientation="portrait"` only guarantees height > width — Pexels still
-    returns a mix of actual ratios within that (a near-square 4:5 photo
-    and a tall 1:2 photo both count as "portrait"). For the reel video,
-    which needs to fill an exact 9:16 frame, a photo whose real ratio is
-    far from that needs a much more aggressive cover-crop to fill the
-    frame, which is what was making some slides look oddly tight/zoomed-in
-    compared to the hero shot. Passing `target_ratio` (width/height, e.g.
-    9/16) makes this prefer candidates reasonably close to that ratio
-    instead of picking any portrait photo at random.
+        models = [os.environ.get("GEMINI_VISION_MODEL") or FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5]
+        for model in [m for m in models if m]:
+            res = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": parts}]},
+                timeout=60,
+            )
+            if res.status_code == 429:
+                print(f"Photo check: quota hit on {model}.")
+                continue
+            if not res.ok:
+                print(f"Photo check failed on {model} ({res.status_code}).")
+                continue
+            text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            m = re.search(r'"best"\s*:\s*(\d+)', text)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            if idx == 0:
+                return False
+            if 1 <= idx <= len(photos):
+                return photos[idx - 1]
+        _vision_state["disabled"] = True   # every model failed: stop trying for the rest of this run
+        return None
+    except Exception as e:
+        print(f"Photo check skipped ({e}).")
+        return None
 
-    Returns (image_bytes, photo_id) so the caller can record the ID.
+
+def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, _retry=False):
+    """
+    Finds a Pexels photo matching `query` and returns (image_bytes, photo_id).
+
+    Selection, in order:
+      1. Skip photos already used in earlier posts (the same photo twice
+         looks like duplicate spam on Pinterest); fall back to the full set
+         if every match was used.
+      2. For the reel, keep only photos close to the target ratio (e.g. 9:16)
+         so the cover-crop stays modest.
+      3. Rank what's left by how well each photo's description matches the
+         query's subject words (Pexels order breaks ties).
+      4. Show the top 5 as thumbnails to Gemini and use the one it says
+         matches. If it says none fit, retry once with a shorter query. If
+         Gemini can't be reached, take one of the best-ranked by description
+         instead. The run never fails because of the photo check.
     """
     used_photo_ids = used_photo_ids or set()
 
@@ -1071,30 +1212,51 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     unused = [p for p in photos if p["id"] not in used_photo_ids]
     if not unused:
         print(f"All Pexels results for '{query}' were already used — reusing one anyway.")
-    candidates = unused or photos
+    pool = unused or photos
 
     if target_ratio:
-        # Prefer photos within ~35% of the target ratio (e.g. 9:16 for the
-        # reel) so the later cover-crop only trims a normal amount instead
-        # of zooming into a thin sliver of an oddly-shaped source photo.
-        # Falls back to the single closest-ratio photo if nothing is close
-        # enough, rather than failing the whole run over it.
+        # Prefer photos within ~35% of the target ratio; if none, use the
+        # single closest-ratio photo rather than failing the run.
         close_enough = [
-            p for p in candidates
+            p for p in pool
             if p.get("width") and p.get("height")
             and abs((p["width"] / p["height"]) - target_ratio) / target_ratio < 0.35
         ]
         if close_enough:
-            photo = random.choice(close_enough)
-        elif any(p.get("width") and p.get("height") for p in candidates):
-            photo = min(
-                (p for p in candidates if p.get("width") and p.get("height")),
+            pool = close_enough
+        elif any(p.get("width") and p.get("height") for p in pool):
+            pool = [min(
+                (p for p in pool if p.get("width") and p.get("height")),
                 key=lambda p: abs((p["width"] / p["height"]) - target_ratio),
-            )
-        else:
-            photo = random.choice(candidates)
-    else:
-        photo = random.choice(candidates)
+            )]
+
+    # No photos with people/faces: drop any whose description mentions them
+    # (if every result has people, keep them all; Gemini's check below
+    # still rejects those if it can).
+    without_people = [p for p in pool if not _photo_has_people(p)]
+    if without_people:
+        pool = without_people
+
+    words = _query_words(query)
+    order = {p["id"]: i for i, p in enumerate(photos)}          # Pexels' own relevance order
+    ranked = sorted(pool, key=lambda p: (-_photo_match_score(p, words), order[p["id"]]))
+    shortlist = ranked[:5]
+
+    photo = None
+    verdict = _gemini_pick_best_photo(query, shortlist) if len(shortlist) > 1 else None
+    if verdict:
+        photo = verdict
+        print(f"Photo check: Gemini picked a match for '{query}'.")
+    elif verdict is False:
+        if not _retry and len(words) > 3:
+            shorter = " ".join(words[:3])
+            print(f"Photo check: none of the photos fit '{query}' — retrying with '{shorter}'.")
+            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, _retry=True)
+        print(f"Photo check: none fit '{query}' — using the best description match.")
+    if photo is None:
+        best_score = _photo_match_score(ranked[0], words)
+        top = [p for p in ranked[:3] if _photo_match_score(p, words) == best_score] or ranked[:1]
+        photo = random.choice(top)
 
     image_url = photo["src"]["large2x"]
     image_res = robust_request("GET", image_url, timeout=30)
@@ -2215,7 +2377,40 @@ def update_hub_page(access_token, posts):
     return r.json().get("url") or (existing or {}).get("url")
 
 
-def boost_indexing(post_url, bing_ok):
+def warn_if_posts_unpublished(access_token, history):
+    """
+    Blogger can silently unpublish a post (it did once: Community Guidelines).
+    Such a post turns into a Draft, but its Pinterest/Tumblr links stay live
+    and now lead nowhere. If any auto-generated post (matched by title
+    against topics_history.json) is sitting in Draft, send a notification.
+    Never raises.
+    """
+    try:
+        res = robust_request(
+            "GET", f"https://www.googleapis.com/blogger/v3/blogs/{BLOGGER_BLOG_ID}/posts",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"status": "draft", "maxResults": 50, "fetchBodies": "false",
+                    "fields": "items(title,url)"},
+            timeout=30,
+        )
+        if not res.ok:
+            return
+        auto_titles = {h.get("title") for h in (history or [])}
+        flagged = [p["title"] for p in res.json().get("items", []) if p.get("title") in auto_titles]
+        if flagged:
+            print("WARNING: auto-posts are in Draft (possibly unpublished by Blogger):", flagged)
+            send_phone_notification(
+                "⚠️ DecorVibe: post(s) unpublished?",
+                "These auto-published posts are now Drafts on Blogger (it may have unpublished "
+                "them for a guidelines issue). Check the Blogger Posts page for a notice, "
+                "then delete or fix them and remove their Pinterest/Tumblr links:\n\n"
+                + "\n".join(f"- {t}" for t in flagged),
+            )
+    except Exception as e:
+        print(f"Draft check skipped: {e}")
+
+
+def boost_indexing(post_url, bing_ok, history=None):
     """
     Runs after publishing. Never raises. (1) Refreshes the all-posts hub
     page, (2) sends a few not-yet-submitted URLs (hub page first, then
@@ -2230,6 +2425,7 @@ def boost_indexing(post_url, bing_ok):
         token = get_access_token()
         posts = fetch_all_live_posts(token)
         print(f"Blogger reports {len(posts)} live posts.")
+        warn_if_posts_unpublished(token, history)
         hub_url = update_hub_page(token, posts)
         print("Hub page updated:", hub_url)
     except Exception as e:
@@ -3377,7 +3573,7 @@ description=extract_pin_description(
         tiktok_ok = post_to_tiktok(reel_video_filepath, tiktok_caption)
 
     print("Updating the all-posts hub page + Bing backlog...")
-    boost_indexing(post_url, bing_ok)
+    boost_indexing(post_url, bing_ok, history)
 
     save_status(
         blogger_ok=True, blogger_url=post_url,
