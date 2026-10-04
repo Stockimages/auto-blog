@@ -54,6 +54,8 @@ GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
 GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
 PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
+# Optional second photo source, used when every Pexels candidate is rejected.
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
 
 # Service-account JSON (full contents) for the Google Indexing API — lets us
 # tell Google to (re)crawl a new post immediately instead of waiting for it
@@ -382,9 +384,20 @@ _TITLE_FILLER = {
 }
 
 
+def _stem(word):
+    """Crude singular form, so 'box' and 'boxes', 'candle' and 'candles' match."""
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 4 and word.endswith("es") and word[:-2].endswith(("x", "s", "z", "ch", "sh")):
+        return word[:-2]
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
 def _title_keywords(title):
     words = re.findall(r"[a-z]+", title.lower().replace("'", ""))
-    return {w for w in words if w not in _TITLE_FILLER and len(w) > 2}
+    return {_stem(w) for w in words if w not in _TITLE_FILLER and len(w) > 2}
 
 
 def find_duplicate_title(title, history, threshold=0.5):
@@ -721,6 +734,10 @@ Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
 Pick ONE fresh, specific, practical angle on {niche} that is not in that list.
+Two posts about the same kind of main object or project (for example two about a
+thrifted wooden box, or two about candle holders) count as repeats even when the
+titles differ, so choose a clearly different object and project from every
+recent title above.
 
 POST FORMAT for THIS post (required — the site was turning into many near-identical
 tutorials, so this post MUST follow this format): {fmt["name"].upper()}: {fmt["instruction"]}
@@ -823,20 +840,19 @@ Also write:
 - "pin_hook": a punchy, benefit- or curiosity-driven phrase, 5-8 words max,
   written like Pinterest pin text (e.g. "10 Thrift Flips That Look Expensive"),
   NOT a full sentence, no ending punctuation.
-- "image_prompt": REQUIRED — 3-5 simple search keywords (not a sentence) for
+- "image_prompt": REQUIRED — 2-4 simple search keywords (not a sentence) for
   the vertical HERO photo (this is the one shown on Pinterest AND the reel's
-  opening shot) — e.g. "thrifted glass vase living room". No brand names, no
-  people's faces, no text. Bias toward a STYLED, finished-look shot rather
-  than a plain product photo: add a styling word when it fits naturally
-  (e.g. "styled", "cozy", "rustic", "close-up", "warm light", "vignette") so
-  the search leans toward an aesthetic, magazine-style result instead of a
-  flat catalog photo — this is what makes someone stop and think "how did
-  they make that?" instead of scrolling past. This field must always be
-  present in your JSON response.
+  opening shot): the main OBJECT plus the room or setting, e.g. "glass vase
+  living room" or "taper candles mantel". No brand names, no people's faces,
+  no text. Keep it SHORT: stock-photo search matches a few clear nouns far
+  better than a long string of adjectives. Use at most ONE styling word
+  (e.g. "cozy", "rustic", "warm light"), and don't put colours or finishes
+  ("matte", "black", "gold") in the query unless the colour is the whole
+  point. This field must always be present in your JSON response.
 - "section_images": a list matching your [[IMG_n]] placeholders, each with a
-  "token" (e.g. "IMG_1") and a "query" (3-5 keyword search terms for a real,
-  horizontal photo matching that section of the article, with the same
-  styled/aesthetic bias as image_prompt above — no people's faces, no text).
+  "token" (e.g. "IMG_1") and a "query" (2-4 keyword search terms for a real,
+  horizontal photo matching that section of the article, written the same
+  short, noun-first way as image_prompt above — no people's faces, no text).
 - "reel_script": a short spoken-word voiceover script for a ~18-22 second
   vertical video (Instagram Reel / TikTok), 45-65 words total, written to be
   read aloud by an AI voice — NOT the article text, and do NOT include any
@@ -1087,6 +1103,7 @@ _QUERY_STYLE_WORDS = {
     # colours / finishes: "matte black" matched a black car's description
     "matte", "black", "white", "dark", "gold", "golden", "silver", "moody", "soft",
     "bright", "natural", "minimalist", "boho", "farmhouse", "glossy", "shiny",
+    "mood", "dim", "glow", "glowing", "aesthetic", "elegant", "luxury", "luxurious",
 }
 
 # Photos whose description mentions these are obviously not home decor.
@@ -1186,7 +1203,44 @@ def _gemini_pick_best_photo(query, photos):
         return None
 
 
-def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, strict=False, _stage=0):
+def _fetch_pixabay(query, orientation):
+    """
+    Pixabay photos for `query`, reshaped like Pexels results so the same
+    ranking and Gemini check apply. Returns [] on any problem. Pixabay's
+    tags serve as the photo "description". Images are downloaded and
+    re-hosted by this script (Pixabay forbids permanent hotlinking), and
+    only a handful of requests per run are made (limit: 100 per minute).
+    """
+    if not PIXABAY_API_KEY:
+        return []
+    try:
+        res = robust_request(
+            "GET", "https://pixabay.com/api/",
+            params={
+                "key": PIXABAY_API_KEY, "q": query[:100], "image_type": "photo",
+                "orientation": "vertical" if orientation == "portrait" else "horizontal",
+                "safesearch": "true", "per_page": 30, "min_width": 900, "lang": "en",
+            },
+            timeout=30,
+        )
+        if not res.ok:
+            print(f"Pixabay search failed ({res.status_code}) — skipping Pixabay.")
+            return []
+        return [
+            {
+                "id": f"pb{h['id']}", "alt": h.get("tags", ""),
+                "width": h.get("imageWidth"), "height": h.get("imageHeight"),
+                "src": {"medium": h["webformatURL"], "small": h.get("previewURL") or h["webformatURL"],
+                        "large2x": h.get("largeImageURL") or h["webformatURL"]},
+            }
+            for h in res.json().get("hits", []) if h.get("webformatURL")
+        ]
+    except Exception as e:
+        print(f"Pixabay search skipped ({e}).")
+        return []
+
+
+def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, strict=False, _stage=0, _source="pexels"):
     """
     Finds a Pexels photo matching `query` and returns (image_bytes, photo_id).
 
@@ -1206,31 +1260,60 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
          (section/reel photos) raise, so that image is skipped rather than
          filled with an unrelated photo; with strict=False (the hero, which
          is required) use the best description match.
+
+    Order of attempts when Gemini keeps saying "none fit": Pexels with the
+    original query -> Pixabay with the same query (only if PIXABAY_API_KEY
+    is set) -> Pexels with the shorter query -> Pexels generic query.
     """
     used_photo_ids = used_photo_ids or set()
+    if _stage == 0 and _source == "pexels" and len(query.split()) > 5:
+        trimmed = " ".join(_query_words(query)[:4])
+        if trimmed:
+            print(f"Photo query trimmed: '{query}' -> '{trimmed}'.")
+            query = trimmed
+    words = _query_words(query)
 
-    res = robust_request(
-        "GET", "https://api.pexels.com/v1/search",
-        headers={"Authorization": PEXELS_API_KEY},
-        params={"query": query, "orientation": orientation, "per_page": 30},
-        timeout=30,
-    )
-    if not res.ok:
-        raise RuntimeError(f"Pexels search failed ({res.status_code}): {res.text}")
+    def rejected_everywhere():
+        """Gemini (or an empty result) rejected this attempt: move to the next one."""
+        if _source == "pexels" and _stage == 0 and PIXABAY_API_KEY:
+            print(f"Photo check: trying Pixabay for '{query}'.")
+            return search_pexels_image(query, orientation, used_photo_ids, target_ratio, strict, _stage=0, _source="pixabay")
+        if _stage == 0 and len(words) > 3:
+            shorter = " ".join(words[:3])
+            print(f"Photo check: none fit '{query}' — retrying with '{shorter}'.")
+            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, strict, _stage=1)
+        if _stage <= 1:
+            print(f"Photo check: none fit '{query}' — trying a generic home-decor photo instead.")
+            return search_pexels_image("home interior decor", orientation, used_photo_ids, target_ratio, strict, _stage=2)
+        return None   # final attempt: caller decides (raise or best match)
 
-    photos = res.json().get("photos", [])
-    if not photos:
+    if _source == "pixabay":
+        photos = _fetch_pixabay(query, orientation)
+        if not photos:
+            return rejected_everywhere()
+    else:
         res = robust_request(
             "GET", "https://api.pexels.com/v1/search",
             headers={"Authorization": PEXELS_API_KEY},
-            params={"query": "home decor", "orientation": orientation, "per_page": 30},
+            params={"query": query, "orientation": orientation, "per_page": 30},
             timeout=30,
         )
         if not res.ok:
-            raise RuntimeError(f"Pexels fallback search failed ({res.status_code}): {res.text}")
+            raise RuntimeError(f"Pexels search failed ({res.status_code}): {res.text}")
+
         photos = res.json().get("photos", [])
         if not photos:
-            raise RuntimeError(f"No Pexels photos found for query: {query}")
+            res = robust_request(
+                "GET", "https://api.pexels.com/v1/search",
+                headers={"Authorization": PEXELS_API_KEY},
+                params={"query": "home decor", "orientation": orientation, "per_page": 30},
+                timeout=30,
+            )
+            if not res.ok:
+                raise RuntimeError(f"Pexels fallback search failed ({res.status_code}): {res.text}")
+            photos = res.json().get("photos", [])
+            if not photos:
+                raise RuntimeError(f"No Pexels photos found for query: {query}")
 
     unused = [p for p in photos if p["id"] not in used_photo_ids]
     if not unused:
@@ -1264,8 +1347,7 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     if on_topic:
         pool = on_topic
 
-    words = _query_words(query)
-    order = {p["id"]: i for i, p in enumerate(photos)}          # Pexels' own relevance order
+    order = {p["id"]: i for i, p in enumerate(photos)}          # the source's own relevance order
     ranked = sorted(pool, key=lambda p: (-_photo_match_score(p, words), order[p["id"]]))
     shortlist = ranked[:5]
 
@@ -1275,13 +1357,9 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
         photo = verdict
         print(f"Photo check: Gemini picked a match for '{query}'.")
     elif verdict is False:
-        if _stage == 0 and len(words) > 3:
-            shorter = " ".join(words[:3])
-            print(f"Photo check: none of the photos fit '{query}' — retrying with '{shorter}'.")
-            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, strict, _stage=1)
-        if _stage <= 1:
-            print(f"Photo check: none fit '{query}' — trying a generic home-decor photo instead.")
-            return search_pexels_image("home interior decor", orientation, used_photo_ids, target_ratio, strict, _stage=2)
+        nxt = rejected_everywhere()
+        if nxt is not None:
+            return nxt
         if strict:
             raise RuntimeError(f"No suitable photo found for '{query}' (every candidate was rejected)")
         print(f"Photo check: none fit '{query}' — using the best description match.")
@@ -1293,7 +1371,7 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     image_url = photo["src"]["large2x"]
     image_res = robust_request("GET", image_url, timeout=30)
     if not image_res.ok:
-        raise RuntimeError(f"Pexels image download failed ({image_res.status_code})")
+        raise RuntimeError(f"Photo download failed ({image_res.status_code})")
     return image_res.content, photo["id"]
 
 
