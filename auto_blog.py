@@ -429,10 +429,10 @@ _BRAND_NAMES = [
     "williams-sonoma", "ballard designs", "serena & lily", "serena and lily", "ethan allen",
     "lulu and georgia", "arhaus", "rh modern",
     # mainstream stores, marketplaces and thrift chains
-    "ikea", "walmart", "amazon", "etsy", "ebay", "wayfair", "home depot", "lowe's", "lowes",
-    "michaels", "hobby lobby", "dollar tree", "dollar general", "goodwill", "salvation army",
-    "habitat for humanity", "homegoods", "home goods", "tj maxx", "tjmaxx", "marshalls",
-    "costco", "world market", "kirkland's", "bed bath & beyond", "joann", "pier 1",
+    "ikea", "walmart", "etsy", "ebay", "wayfair", "home depot", "lowe's", "lowes",
+    "hobby lobby", "dollar tree", "dollar general", "salvation army",
+    "habitat for humanity", "homegoods", "tj maxx", "tjmaxx",
+    "costco", "world market", "kirkland's", "bed bath & beyond", "pier 1",
     "facebook marketplace", "craigslist", "offerup", "poshmark",
     # branded craft / paint / tool products
     "mod podge", "rust-oleum", "rustoleum", "krylon", "annie sloan", "behr", "sherwin-williams",
@@ -440,6 +440,10 @@ _BRAND_NAMES = [
     "sharpie", "velcro", "gorilla glue", "elmer's", "e6000", "dixie belle", "general finishes",
     "command strips", "command hooks", "command hook",
 ]
+_BRAND_NAMES_CAPITALIZED = ["Goodwill", "Amazon", "Michaels", "Marshalls", "Joann"]
+_BRAND_RE_CAP = re.compile(
+    r"(?<![A-Za-z0-9])(?:" + "|".join(_BRAND_NAMES_CAPITALIZED) + r")(?![A-Za-z0-9])"
+)
 _BRAND_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(b) for b in sorted(_BRAND_NAMES, key=len, reverse=True)) + r")(?![A-Za-z0-9])",
     re.IGNORECASE,
@@ -470,7 +474,7 @@ def find_quality_problems(draft, min_words=600):
         draft.get("title", ""), body_text, draft.get("pin_hook", "") or "",
         draft.get("pin_description", "") or "", json.dumps(draft.get("faq", []), ensure_ascii=False),
     ])
-    brand = _BRAND_RE.search(searchable)
+    brand = _BRAND_RE.search(searchable) or _BRAND_RE_CAP.search(searchable)
     if brand:
         problems.append(f"names a brand/store/product: \"{brand.group(0)}\"")
     return problems
