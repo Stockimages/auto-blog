@@ -1113,7 +1113,7 @@ _OFFTOPIC_WORDS = {
     "smartphone", "runway", "makeup", "wedding", "sports", "football", "soccer",
 }
 
-VISION_CHECKS_PER_RUN = 24      # cap on Gemini photo-check calls per run (a video run makes ~15)
+VISION_CHECKS_PER_RUN = 36      # cap on Gemini photo-check calls per run (a video run makes ~15-20)
 _vision_state = {"used": 0, "disabled": False}
 
 
@@ -1123,6 +1123,25 @@ _PEOPLE_WORDS = {
     "mother", "father", "bride", "groom", "friends", "teen", "toddler", "selfie", "face",
     "faces", "male", "female", "santa", "wearing",
 }
+
+
+# A fall post got a photo with "Merry Christmas" pillows. Photos showing a
+# holiday are skipped unless the keywords or the post itself are about it.
+_HOLIDAY_WORDS = {
+    "christmas": {"christmas", "xmas", "santa", "reindeer", "jingle", "snowman", "ornament", "ornaments"},
+    "halloween": {"halloween", "spooky", "witch", "skeleton", "jack", "lantern"},
+}
+_photo_context = {"text": ""}   # set per post in main(): title + seasonal theme
+
+
+def _blocked_holiday_words(query):
+    text = f"{query} {_photo_context['text']}".lower()
+    blocked = set()
+    for holiday, words in _HOLIDAY_WORDS.items():
+        mentioned = holiday in text or (holiday == "christmas" and ("holiday" in text or "winter" in text))
+        if not mentioned:
+            blocked |= words
+    return blocked
 
 
 def _photo_is_offtopic(photo):
@@ -1145,7 +1164,7 @@ def _photo_match_score(photo, words):
     return sum(1 for w in words if w in alt)
 
 
-def _gemini_pick_best_photo(query, photos):
+def _gemini_pick_best_photo(query, photos, ideal=None):
     """
     Shows up to 5 small thumbnails to Gemini and asks which one genuinely
     matches `query`. Returns the chosen photo, 0-based, or:
@@ -1156,12 +1175,19 @@ def _gemini_pick_best_photo(query, photos):
     if _vision_state["disabled"] or _vision_state["used"] >= VISION_CHECKS_PER_RUN:
         return None
     try:
+        context_line = ""
+        if ideal:
+            context_line += f" The ideal photo for this part of the article: {ideal}"
+        if _photo_context["text"].strip():
+            context_line += f" The blog post is titled: \"{_photo_context['text'].strip()}\"."
         parts = [{"text": (
             f"You are choosing a photo for a budget home-decor blog. The photo should clearly "
-            f"show: \"{query}\". Below are {len(photos)} candidate photos, numbered in order. "
+            f"show: \"{query}\".{context_line} Below are {len(photos)} candidate photos, numbered in order. "
             f"Pick the ONE that best matches those keywords and looks like a clean, real interior "
             f"or decor photo (not mostly text or graphics). REJECT any photo where a person or a "
-            f"face is visible. If none of them genuinely fit, answer 0. "
+            f"face is visible, any photo with clearly readable words or lettering, and any photo "
+            f"showing Christmas or Halloween decor unless the keywords ask for that holiday. "
+            f"If none of them genuinely fit, answer 0. "
             f"Reply with ONLY JSON like {{\"best\": 2}}."
         )}]
         for i, p in enumerate(photos, start=1):
@@ -1240,7 +1266,7 @@ def _fetch_pixabay(query, orientation):
         return []
 
 
-def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, strict=False, _stage=0, _source="pexels"):
+def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, strict=False, _stage=0, _source="pexels", fallbacks=True, ideal=None):
     """
     Finds a Pexels photo matching `query` and returns (image_bytes, photo_id).
 
@@ -1277,14 +1303,17 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
         """Gemini (or an empty result) rejected this attempt: move to the next one."""
         if _source == "pexels" and _stage == 0 and PIXABAY_API_KEY:
             print(f"Photo check: trying Pixabay for '{query}'.")
-            return search_pexels_image(query, orientation, used_photo_ids, target_ratio, strict, _stage=0, _source="pixabay")
+            return search_pexels_image(query, orientation, used_photo_ids, target_ratio, strict, _stage=0,
+                                       _source="pixabay", fallbacks=fallbacks, ideal=ideal)
+        if not fallbacks:
+            raise RuntimeError(f"No suitable photo found for '{query}'")
         if _stage == 0 and len(words) > 3:
             shorter = " ".join(words[:3])
             print(f"Photo check: none fit '{query}' — retrying with '{shorter}'.")
-            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, strict, _stage=1)
+            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, strict, _stage=1, ideal=ideal)
         if _stage <= 1:
             print(f"Photo check: none fit '{query}' — trying a generic home-decor photo instead.")
-            return search_pexels_image("home interior decor", orientation, used_photo_ids, target_ratio, strict, _stage=2)
+            return search_pexels_image("home interior decor", orientation, used_photo_ids, target_ratio, strict, _stage=2, ideal=ideal)
         return None   # final attempt: caller decides (raise or best match)
 
     if _source == "pixabay":
@@ -1346,13 +1375,22 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     on_topic = [p for p in pool if not _photo_is_offtopic(p)]
     if on_topic:
         pool = on_topic
+    # ...and holiday-decor photos when the post isn't about that holiday
+    blocked = _blocked_holiday_words(query)
+    if blocked:
+        no_holiday = [
+            p for p in pool
+            if not (set(re.findall(r"[a-z]+", (p.get("alt") or "").lower())) & blocked)
+        ]
+        if no_holiday:
+            pool = no_holiday
 
     order = {p["id"]: i for i, p in enumerate(photos)}          # the source's own relevance order
     ranked = sorted(pool, key=lambda p: (-_photo_match_score(p, words), order[p["id"]]))
     shortlist = ranked[:5]
 
     photo = None
-    verdict = _gemini_pick_best_photo(query, shortlist) if len(shortlist) > 1 else None
+    verdict = _gemini_pick_best_photo(query, shortlist, ideal) if len(shortlist) > 1 else None
     if verdict:
         photo = verdict
         print(f"Photo check: Gemini picked a match for '{query}'.")
@@ -1373,6 +1411,93 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     if not image_res.ok:
         raise RuntimeError(f"Photo download failed ({image_res.status_code})")
     return image_res.content, photo["id"]
+
+
+def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=None, strict=False):
+    """
+    Tries several alternative queries (most specific first), each against
+    Pexels and then Pixabay, with Gemini checking the candidates. The first
+    query that yields an accepted photo wins. Only if every query is
+    rejected does the old fallback chain run (shorter query, generic query,
+    then best description match / skip).
+    """
+    queries = [q for q in dict.fromkeys(q.strip() for q in queries if q and q.strip())]
+    for q in queries[:4]:
+        try:
+            return search_pexels_image(q, orientation, used_photo_ids, target_ratio,
+                                       strict=True, fallbacks=False, ideal=ideal)
+        except RuntimeError as e:
+            print(f"Photo search for '{q}' had no accepted photo ({e}) — trying the next query.")
+    print("No planned query produced an accepted photo — using the standard fallbacks.")
+    return search_pexels_image(queries[0], orientation, used_photo_ids, target_ratio,
+                               strict=strict, ideal=ideal)
+
+
+def plan_photo_queries(draft, n_extra=4):
+    """
+    One focused Gemini call, made AFTER the article is written, that plans
+    every photo: for the hero, each section image and a few extra vertical
+    shots for the video, it returns up to 3 alternative search queries plus a
+    one-line description of the ideal photo. The article prompt writes the
+    article; this prompt only has to think about photos, and it can see the
+    finished text. Returns {slot: {"queries": [...], "ideal": "..."}}; {}
+    if anything goes wrong (the article's own queries are used then).
+    """
+    try:
+        tokens = [s.get("token") for s in draft.get("section_images", []) if s.get("token")]
+        plain = re.sub(r"<[^>]+>", " ", draft.get("html", ""))
+        slots = ["- hero: the single vertical cover photo for the whole post."]
+        for t in tokens:
+            i = plain.find(f"[[{t}]]")
+            window = plain[max(0, i - 200): i + 400] if i >= 0 else plain[:500]
+            window = re.sub(r"\s+", " ", window.replace(f"[[{t}]]", " <photo goes here> ")).strip()
+            slots.append(f'- {t}: a horizontal photo for this part of the article: "{window}"')
+        for n in range(1, n_extra + 1):
+            slots.append(f"- extra_{n}: an extra VERTICAL photo for a short video; it must show a DIFFERENT "
+                         f"object or area of the topic than the hero and the other slots.")
+        theme = draft.get("_theme")
+        season = (f"Seasonal theme: {theme}." if theme
+                  else "This is an evergreen (not seasonal, not holiday) post.")
+        prompt = (
+            "You choose stock photos for a budget home-decor blog post.\n"
+            f"Post title: {draft.get('title', '')}\nCategory: {draft.get('category', '')}\n{season}\n\n"
+            "For EACH slot below give up to 3 alternative stock-photo search queries, ordered from most "
+            "specific to most general, plus a one-sentence description of the ideal photo.\n"
+            "Query rules: 2-4 words; start with the main physical OBJECT then the room or setting; NO "
+            "adjectives about style, colour, mood or finish; no brand names; no people; no text; the photo "
+            "must suit the post's season (no Christmas or Halloween items unless the post is about that "
+            "holiday).\n\nSlots:\n" + "\n".join(slots) + "\n\n"
+            'Return ONLY JSON like {"photos":[{"slot":"hero","queries":["a","b","c"],"ideal":"..."}]} '
+            "with one entry per slot above."
+        )
+        for model in [m for m in (FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5, FALLBACK_TEXT_MODEL_3) if m]:
+            res = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=90,
+            )
+            if not res.ok:
+                print(f"Photo planning: {model} returned {res.status_code}, trying the next model.")
+                continue
+            text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if not m:
+                continue
+            plan = {}
+            for item in json.loads(m.group(0)).get("photos", []):
+                slot = item.get("slot")
+                queries = [q.strip() for q in item.get("queries", [])
+                           if isinstance(q, str) and 0 < len(q.split()) <= 6]
+                if slot and queries:
+                    plan[slot] = {"queries": queries[:3], "ideal": (item.get("ideal") or "").strip() or None}
+            if plan:
+                print(f"Photo planning: {len(plan)} slot(s) planned by {model}.")
+                return plan
+        print("Photo planning produced nothing — using the article's own photo queries.")
+    except Exception as e:
+        print(f"Photo planning skipped ({e}) — using the article's own photo queries.")
+    return {}
 
 
 def compress_image(image_bytes, max_width=1200, quality=78):
@@ -3107,9 +3232,13 @@ def main():
         this_run_photo_ids = []
 
         # --- Hero image (vertical, with the Pinterest text hook baked in) ---
+        _photo_context["text"] = f"{draft.get('title', '')} {draft.get('_theme') or ''}"
+        photo_plan = plan_photo_queries(draft)
         print("Finding hero (Pinterest) photo...")
-        raw_hero, hero_photo_id = search_pexels_image(
-            draft["image_prompt"], orientation="portrait", used_photo_ids=used_photo_ids
+        hero_plan = photo_plan.get("hero", {})
+        raw_hero, hero_photo_id = find_best_photo(
+            hero_plan.get("queries", []) + [draft["image_prompt"]], hero_plan.get("ideal"),
+            "portrait", used_photo_ids,
         )
         this_run_photo_ids.append(hero_photo_id)
         used_photo_ids.add(hero_photo_id)
@@ -3194,8 +3323,10 @@ def main():
             query = section.get("query", draft["image_prompt"])
             print(f"Finding section photo for {token}: {query}")
             try:
-                raw_section, section_photo_id = search_pexels_image(
-                    query, orientation="landscape", used_photo_ids=used_photo_ids, strict=True
+                section_plan = photo_plan.get(token, {})
+                raw_section, section_photo_id = find_best_photo(
+                    section_plan.get("queries", []) + [query], section_plan.get("ideal"),
+                    "landscape", used_photo_ids, strict=True,
                 )
                 this_run_photo_ids.append(section_photo_id)
                 used_photo_ids.add(section_photo_id)
@@ -3263,13 +3394,18 @@ def main():
             # needed than there are distinct queries.
             real_image_bytes = [raw_hero]
             section_queries = [q for _, q in section_urls.values()] or [draft["image_prompt"]]
+            # The planner's "extra" slots (different objects/areas of the topic)
+            # come first; the article's own section queries are the fallback.
+            reel_slots = [photo_plan[k] for k in sorted(photo_plan) if k.startswith("extra_") and photo_plan[k].get("queries")]
+            reel_slots += [{"queries": [q], "ideal": None} for q in section_queries]
             qi = 0
             while len(real_image_bytes) < n_content_slides:
-                query = section_queries[qi % len(section_queries)]
+                slot = reel_slots[qi % len(reel_slots)]
+                query = slot["queries"][0]
                 qi += 1
                 try:
-                    raw_bytes, photo_id = search_pexels_image(
-                        query, orientation="portrait", used_photo_ids=used_photo_ids,
+                    raw_bytes, photo_id = find_best_photo(
+                        slot["queries"], slot["ideal"], "portrait", used_photo_ids,
                         target_ratio=9 / 16, strict=True,
                     )
                     real_image_bytes.append(raw_bytes)
@@ -3277,7 +3413,7 @@ def main():
                     used_photo_ids.add(photo_id)
                 except Exception as e:
                     print(f"Couldn't fetch an extra portrait image for '{query}': {e}")
-                    if qi > len(section_queries) * 3:
+                    if qi > len(reel_slots) * 3:
                         break  # give up rather than loop forever if Pexels keeps failing
 
             n_content_slides = len(real_image_bytes)  # actual count, in case fetches came up short
