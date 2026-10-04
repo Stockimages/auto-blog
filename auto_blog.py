@@ -738,6 +738,12 @@ Two posts about the same kind of main object or project (for example two about a
 thrifted wooden box, or two about candle holders) count as repeats even when the
 titles differ, so choose a clearly different object and project from every
 recent title above.
+PHOTOGRAPHABLE TOPICS: this blog's pictures come from generic stock-photo
+libraries, so choose a project or idea that a stock photo of a common home scene
+can illustrate (a mantel, shelf, table, bed, entryway, planter, candles,
+curtains, a dresser, a bathroom vanity). Avoid projects whose key object is an
+unusual hybrid that no stock photo would show (for example a leather-wrapped
+glass lantern).
 
 POST FORMAT for THIS post (required — the site was turning into many near-identical
 tutorials, so this post MUST follow this format): {fmt["name"].upper()}: {fmt["instruction"]}
@@ -1413,7 +1419,7 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     return image_res.content, photo["id"]
 
 
-def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=None, strict=False):
+def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=None, strict=False, allow_fallback=True):
     """
     Tries several alternative queries (most specific first), each against
     Pexels and then Pixabay, with Gemini checking the candidates. The first
@@ -1428,6 +1434,8 @@ def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=No
                                        strict=True, fallbacks=False, ideal=ideal)
         except RuntimeError as e:
             print(f"Photo search for '{q}' had no accepted photo ({e}) — trying the next query.")
+    if not allow_fallback:
+        raise RuntimeError("no query produced an accepted photo")
     print("No planned query produced an accepted photo — using the standard fallbacks.")
     return search_pexels_image(queries[0], orientation, used_photo_ids, target_ratio,
                                strict=strict, ideal=ideal)
@@ -1498,6 +1506,37 @@ def plan_photo_queries(draft, n_extra=4):
     except Exception as e:
         print(f"Photo planning skipped ({e}) — using the article's own photo queries.")
     return {}
+
+
+def draft_has_hero_photo(draft, history):
+    """
+    "Photographability" gate. Some topics (e.g. a leather-wrapped glass
+    lantern) are so specific that no stock library has a photo of them, and
+    the post ends up with a loosely related picture. Before accepting a
+    draft, run the photo planner and look for an accepted HERO photo. If
+    Gemini rejects every candidate, the topic is turned down and a more
+    photographable one is requested. On success the plan and the photo are
+    kept on the draft so they aren't searched for twice. A technical hiccup
+    never blocks publishing (returns True).
+    """
+    try:
+        _photo_context["text"] = f"{draft.get('title', '')} {draft.get('_theme') or ''}"
+        used = set()
+        for h in history:
+            used.update(h.get("photo_ids", []))
+        plan = plan_photo_queries(draft)
+        hero_plan = plan.get("hero", {})
+        queries = hero_plan.get("queries", []) + [draft["image_prompt"]]
+        raw, photo_id = find_best_photo(queries, hero_plan.get("ideal"), "portrait", used,
+                                        strict=True, allow_fallback=False)
+        draft["_photo_plan"] = plan
+        draft["_hero_photo"] = (raw, photo_id)
+        return True
+    except RuntimeError:
+        return False
+    except Exception as e:
+        print(f"Photo check for the topic was skipped ({e}).")
+        return True
 
 
 def compress_image(image_bytes, max_width=1200, quality=78):
@@ -3175,7 +3214,12 @@ def main():
             duplicate_of = find_duplicate_title(draft["title"], history)
             quality_problems = find_quality_problems(draft)
             if duplicate_of is None and not quality_problems:
-                break
+                if attempt >= MAX_TOPIC_ATTEMPTS or draft_has_hero_photo(draft, history):
+                    break   # (the last attempt skips the photo gate: a post goes out rather than none)
+                print(f"Topic '{draft['title']}' rejected (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}): no suitable "
+                      f"stock photo exists for it — asking for a more photographable topic.")
+                prompt_history = prompt_history + [{"title": draft["title"]}]
+                continue
             if duplicate_of is not None:
                 print(f"Topic '{draft['title']}' is too similar to existing post "
                       f"'{duplicate_of}' (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}) — asking for a different one.")
@@ -3233,13 +3277,17 @@ def main():
 
         # --- Hero image (vertical, with the Pinterest text hook baked in) ---
         _photo_context["text"] = f"{draft.get('title', '')} {draft.get('_theme') or ''}"
-        photo_plan = plan_photo_queries(draft)
+        photo_plan = draft.get("_photo_plan") or plan_photo_queries(draft)
         print("Finding hero (Pinterest) photo...")
         hero_plan = photo_plan.get("hero", {})
-        raw_hero, hero_photo_id = find_best_photo(
-            hero_plan.get("queries", []) + [draft["image_prompt"]], hero_plan.get("ideal"),
-            "portrait", used_photo_ids,
-        )
+        if draft.get("_hero_photo"):
+            raw_hero, hero_photo_id = draft["_hero_photo"]   # already found by the topic check
+            print("Hero photo was already found while checking the topic.")
+        else:
+            raw_hero, hero_photo_id = find_best_photo(
+                hero_plan.get("queries", []) + [draft["image_prompt"]], hero_plan.get("ideal"),
+                "portrait", used_photo_ids,
+            )
         this_run_photo_ids.append(hero_photo_id)
         used_photo_ids.add(hero_photo_id)
         pin_hook = draft.get("pin_hook", draft["title"])
