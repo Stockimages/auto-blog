@@ -517,7 +517,7 @@ POST_FORMATS = [
      "needs_list": True,
      "table_hint": "a materials and cost breakdown with columns Item, Price"},
     {"name": "listicle", "weight": 3, "use_title_styles": False,
-     "instruction": "A numbered list post of 5-9 ideas. Each idea gets its own h2/h3 with a concrete tip, a rough cost and why it works. NOT a single step-by-step project and NOT the 'turn X into Y' framing.",
+     "instruction": "A numbered list post of 5-9 ideas. Each idea gets its own h2/h3 with a concrete tip, a rough cost and why it works. NOT a single step-by-step project and NOT the 'turn X into Y' framing. Costs are PER IDEA: total_cost must be the range of the per-idea costs in your table (for example \"$6-$30 per idea\"), and the closing paragraph must state that same per-idea range, never a single total that contradicts the table.",
      "table_hint": "a summary table with columns Idea, Approx. cost, Time",
      "title_hint": "number-led and specific, e.g. '7 Budget Ways to Make a Small Bedroom Feel Bigger'"},
     {"name": "room refresh plan", "weight": 2, "use_title_styles": False,
@@ -1468,7 +1468,9 @@ def plan_photo_queries(draft, n_extra=4):
             slots.append(f"- extra_{n}: an extra VERTICAL photo for a short video; it must show a DIFFERENT "
                          f"object or area of the topic than the hero and the other slots.")
         theme = draft.get("_theme")
-        season = (f"Seasonal theme: {theme}." if theme
+        season = (f"Seasonal theme: {theme}. The hero photo should visibly show this season or holiday "
+                  f"when that looks natural (for example warm candles, garland, autumn colours), so "
+                  f"the cover matches the title." if theme
                   else "This is an evergreen (not seasonal, not holiday) post.")
         prompt = (
             "You choose stock photos for a budget home-decor blog post.\n"
@@ -1518,6 +1520,28 @@ def plan_photo_queries(draft, n_extra=4):
     except Exception as e:
         print(f"Photo planning skipped ({e}) — using the article's own photo queries.")
     return {}
+
+
+def fix_listicle_cost(draft):
+    """
+    Listicle Quick Take showed "$25-$45" while the table's seven items added
+    up to $126. For listicles the cost is per idea, so total_cost is
+    rebuilt from the table's own prices: "$6-$30 per idea".
+    """
+    try:
+        if draft.get("_format") != "listicle":
+            return
+        m = re.search(r"<table.*?</table>", draft.get("html", ""), re.DOTALL | re.IGNORECASE)
+        if not m:
+            return
+        amounts = [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", m.group(0))]
+        if len(amounts) < 2:
+            return
+        lo, hi = min(amounts), max(amounts)
+        fmt_amt = lambda v: f"${v:g}"
+        draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)} per idea" if lo != hi else f"{fmt_amt(lo)} per idea")
+    except Exception as e:
+        print(f"Listicle cost fix skipped ({e}).")
 
 
 def draft_has_hero_photo(draft, history):
@@ -3245,6 +3269,7 @@ def main():
                 f"(last: '{draft['title']}' — {duplicate_of and 'duplicate topic' or '; '.join(quality_problems)}). "
                 f"Nothing was published this run."
             )
+        fix_listicle_cost(draft)
         print("Topic chosen:", draft["title"])
 
         category = draft["category"]
