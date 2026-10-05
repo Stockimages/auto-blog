@@ -1170,7 +1170,7 @@ def _photo_match_score(photo, words):
     return sum(1 for w in words if w in alt)
 
 
-def _gemini_pick_best_photo(query, photos, ideal=None):
+def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
     """
     Shows up to 5 small thumbnails to Gemini and asks which one genuinely
     matches `query`. Returns the chosen photo, 0-based, or:
@@ -1182,6 +1182,10 @@ def _gemini_pick_best_photo(query, photos, ideal=None):
         return None
     try:
         context_line = ""
+        if subject:
+            context_line += (f" The photo's MAIN SUBJECT must be: {subject} — clearly visible and the "
+                             f"focus of the picture, not just something small in the background or a "
+                             f"similar-looking object. If no photo clearly shows it, answer 0.")
         if ideal:
             context_line += f" The ideal photo for this part of the article: {ideal}"
         if _photo_context["text"].strip():
@@ -1272,7 +1276,7 @@ def _fetch_pixabay(query, orientation):
         return []
 
 
-def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, strict=False, _stage=0, _source="pexels", fallbacks=True, ideal=None):
+def search_pexels_image(query, orientation="portrait", used_photo_ids=None, target_ratio=None, strict=False, _stage=0, _source="pexels", fallbacks=True, ideal=None, subject=None):
     """
     Finds a Pexels photo matching `query` and returns (image_bytes, photo_id).
 
@@ -1310,16 +1314,16 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
         if _source == "pexels" and _stage == 0 and PIXABAY_API_KEY:
             print(f"Photo check: trying Pixabay for '{query}'.")
             return search_pexels_image(query, orientation, used_photo_ids, target_ratio, strict, _stage=0,
-                                       _source="pixabay", fallbacks=fallbacks, ideal=ideal)
+                                       _source="pixabay", fallbacks=fallbacks, ideal=ideal, subject=subject)
         if not fallbacks:
             raise RuntimeError(f"No suitable photo found for '{query}'")
         if _stage == 0 and len(words) > 3:
             shorter = " ".join(words[:3])
             print(f"Photo check: none fit '{query}' — retrying with '{shorter}'.")
-            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, strict, _stage=1, ideal=ideal)
+            return search_pexels_image(shorter, orientation, used_photo_ids, target_ratio, strict, _stage=1, ideal=ideal, subject=subject)
         if _stage <= 1:
             print(f"Photo check: none fit '{query}' — trying a generic home-decor photo instead.")
-            return search_pexels_image("home interior decor", orientation, used_photo_ids, target_ratio, strict, _stage=2, ideal=ideal)
+            return search_pexels_image("home interior decor", orientation, used_photo_ids, target_ratio, strict, _stage=2, ideal=ideal, subject=subject)
         return None   # final attempt: caller decides (raise or best match)
 
     if _source == "pixabay":
@@ -1393,10 +1397,10 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
 
     order = {p["id"]: i for i, p in enumerate(photos)}          # the source's own relevance order
     ranked = sorted(pool, key=lambda p: (-_photo_match_score(p, words), order[p["id"]]))
-    shortlist = ranked[:5]
+    shortlist = ranked[:6]
 
     photo = None
-    verdict = _gemini_pick_best_photo(query, shortlist, ideal) if len(shortlist) > 1 else None
+    verdict = _gemini_pick_best_photo(query, shortlist, ideal, subject) if len(shortlist) > 1 else None
     if verdict:
         photo = verdict
         print(f"Photo check: Gemini picked a match for '{query}'.")
@@ -1419,7 +1423,7 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
     return image_res.content, photo["id"]
 
 
-def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=None, strict=False, allow_fallback=True):
+def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=None, strict=False, allow_fallback=True, subject=None):
     """
     Tries several alternative queries (most specific first), each against
     Pexels and then Pixabay, with Gemini checking the candidates. The first
@@ -1431,14 +1435,14 @@ def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=No
     for q in queries[:4]:
         try:
             return search_pexels_image(q, orientation, used_photo_ids, target_ratio,
-                                       strict=True, fallbacks=False, ideal=ideal)
+                                       strict=True, fallbacks=False, ideal=ideal, subject=subject)
         except RuntimeError as e:
             print(f"Photo search for '{q}' had no accepted photo ({e}) — trying the next query.")
     if not allow_fallback:
         raise RuntimeError("no query produced an accepted photo")
     print("No planned query produced an accepted photo — using the standard fallbacks.")
     return search_pexels_image(queries[0], orientation, used_photo_ids, target_ratio,
-                               strict=strict, ideal=ideal)
+                               strict=strict, ideal=ideal, subject=subject)
 
 
 def plan_photo_queries(draft, n_extra=4):
@@ -1470,12 +1474,15 @@ def plan_photo_queries(draft, n_extra=4):
             "You choose stock photos for a budget home-decor blog post.\n"
             f"Post title: {draft.get('title', '')}\nCategory: {draft.get('category', '')}\n{season}\n\n"
             "For EACH slot below give up to 3 alternative stock-photo search queries, ordered from most "
-            "specific to most general, plus a one-sentence description of the ideal photo.\n"
+            "specific to most general, a one-sentence description of the ideal photo, and the SUBJECT: "
+            "the single most important physical object that must be clearly visible as the focus of the "
+            "photo (2-3 words, e.g. \"wooden coat stand\"). For the hero the subject is the post's main "
+            "object.\n"
             "Query rules: 2-4 words; start with the main physical OBJECT then the room or setting; NO "
             "adjectives about style, colour, mood or finish; no brand names; no people; no text; the photo "
             "must suit the post's season (no Christmas or Halloween items unless the post is about that "
             "holiday).\n\nSlots:\n" + "\n".join(slots) + "\n\n"
-            'Return ONLY JSON like {"photos":[{"slot":"hero","queries":["a","b","c"],"ideal":"..."}]} '
+            'Return ONLY JSON like {"photos":[{"slot":"hero","queries":["a","b","c"],"ideal":"...","subject":"..."}]} '
             "with one entry per slot above."
         )
         for model in [m for m in (FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5, FALLBACK_TEXT_MODEL_3) if m]:
@@ -1498,7 +1505,12 @@ def plan_photo_queries(draft, n_extra=4):
                 queries = [q.strip() for q in item.get("queries", [])
                            if isinstance(q, str) and 0 < len(q.split()) <= 6]
                 if slot and queries:
-                    plan[slot] = {"queries": queries[:3], "ideal": (item.get("ideal") or "").strip() or None}
+                    subject = item.get("subject")
+                    plan[slot] = {
+                        "queries": queries[:3],
+                        "ideal": (item.get("ideal") or "").strip() or None,
+                        "subject": subject.strip() if isinstance(subject, str) and subject.strip() else None,
+                    }
             if plan:
                 print(f"Photo planning: {len(plan)} slot(s) planned by {model}.")
                 return plan
@@ -1528,7 +1540,7 @@ def draft_has_hero_photo(draft, history):
         hero_plan = plan.get("hero", {})
         queries = hero_plan.get("queries", []) + [draft["image_prompt"]]
         raw, photo_id = find_best_photo(queries, hero_plan.get("ideal"), "portrait", used,
-                                        strict=True, allow_fallback=False)
+                                        strict=True, allow_fallback=False, subject=hero_plan.get("subject"))
         draft["_photo_plan"] = plan
         draft["_hero_photo"] = (raw, photo_id)
         return True
@@ -3286,7 +3298,7 @@ def main():
         else:
             raw_hero, hero_photo_id = find_best_photo(
                 hero_plan.get("queries", []) + [draft["image_prompt"]], hero_plan.get("ideal"),
-                "portrait", used_photo_ids,
+                "portrait", used_photo_ids, subject=hero_plan.get("subject"),
             )
         this_run_photo_ids.append(hero_photo_id)
         used_photo_ids.add(hero_photo_id)
@@ -3374,7 +3386,7 @@ def main():
                 section_plan = photo_plan.get(token, {})
                 raw_section, section_photo_id = find_best_photo(
                     section_plan.get("queries", []) + [query], section_plan.get("ideal"),
-                    "landscape", used_photo_ids, strict=True,
+                    "landscape", used_photo_ids, strict=True, subject=section_plan.get("subject"),
                 )
                 this_run_photo_ids.append(section_photo_id)
                 used_photo_ids.add(section_photo_id)
@@ -3445,7 +3457,7 @@ def main():
             # The planner's "extra" slots (different objects/areas of the topic)
             # come first; the article's own section queries are the fallback.
             reel_slots = [photo_plan[k] for k in sorted(photo_plan) if k.startswith("extra_") and photo_plan[k].get("queries")]
-            reel_slots += [{"queries": [q], "ideal": None} for q in section_queries]
+            reel_slots += [{"queries": [q], "ideal": None, "subject": None} for q in section_queries]
             qi = 0
             while len(real_image_bytes) < n_content_slides:
                 slot = reel_slots[qi % len(reel_slots)]
@@ -3454,7 +3466,7 @@ def main():
                 try:
                     raw_bytes, photo_id = find_best_photo(
                         slot["queries"], slot["ideal"], "portrait", used_photo_ids,
-                        target_ratio=9 / 16, strict=True,
+                        target_ratio=9 / 16, strict=True, subject=slot.get("subject"),
                     )
                     real_image_bytes.append(raw_bytes)
                     this_run_photo_ids.append(photo_id)
