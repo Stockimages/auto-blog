@@ -87,6 +87,12 @@ TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
 TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
 
 
+try:
+    import video_template   # the black-bars/yellow-words template (video_template.py next to this file)
+except ImportError:
+    video_template = None
+
+
 def env_flag(name):
     """True only if the env var is set to 1/true/yes/on (anything else = off)."""
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
@@ -105,6 +111,11 @@ ENABLE_TIKTOK = env_flag("ENABLE_TIKTOK")
 #   pages, so for blog posts it doesn't speed anything up and misuse can get
 #   API access revoked. Google finds posts through the sitemap + hub page.
 ENABLE_GOOGLE_INDEXING = env_flag("ENABLE_GOOGLE_INDEXING")
+# Video look: "template" (black bars, yellow words, 41 transitions, swoosh) is the
+# default when video_template.py is present; set VIDEO_STYLE=classic to go back.
+USE_TEMPLATE_VIDEO = video_template is not None and os.environ.get("VIDEO_STYLE", "template").strip().lower() != "classic"
+# Voice: Gemini "Zephyr" first, Edge-TTS as automatic fallback; VOICE_ENGINE=edge skips Gemini.
+USE_GEMINI_VOICE = video_template is not None and os.environ.get("VOICE_ENGINE", "gemini").strip().lower() != "edge"
 
 # Facebook Page — auto-posts a link to the Page right after each Blogger post.
 FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
@@ -1776,6 +1787,22 @@ def pick_background_music():
     return random.choice(tracks) if tracks else None
 
 
+TEMPLATE_BOTTOM_LINES = [
+    ("WATCH TILL THE END", ["END"]),
+    ("SAVE THIS IDEA FOR LATER", ["SAVE"]),
+    ("READ THE FULL GUIDE ON OUR SITE", ["GUIDE"]),
+    ("TRY THIS THIS WEEKEND", ["WEEKEND"]),
+    ("FOLLOW FOR MORE BUDGET IDEAS", ["BUDGET"]),
+]
+
+
+def template_bar_texts(draft):
+    """Top bar = the post's hook; bottom bar = a short call to action."""
+    top = (draft.get("pin_hook") or draft.get("title") or "").strip()
+    bottom, highlight = random.choice(TEMPLATE_BOTTOM_LINES)
+    return top, bottom, highlight
+
+
 def synthesize_voiceover(script_text, out_path, voice=None):
     """
     Converts the reel script to speech via Microsoft Edge-TTS (free,
@@ -1793,6 +1820,11 @@ def synthesize_voiceover(script_text, out_path, voice=None):
     back-to-back videos using the same voice don't all sound identically
     monotone). Writes an mp3 to out_path.
     """
+    if USE_GEMINI_VOICE:
+        if video_template.synthesize_gemini_voiceover(script_text, out_path, GEMINI_API_KEY):
+            print("Voiceover: Gemini voice (Zephyr).")
+            return
+        print("Gemini voice unavailable — falling back to Edge-TTS.")
     voice = voice or random.choice(REEL_VOICES)
     pitch_offset = random.randint(-15, 5)  # Hz
     print(f"Using voice: {voice} (rate=-4%, pitch={pitch_offset:+d}Hz)")
@@ -3433,6 +3465,7 @@ def main():
                 print(f"Section photo for {token} failed, skipping it: {e}")
 
         reel_video_filepath = None
+        reel_video_url = None
         pin_cover_filepath = None
         if RUN_TYPE == "video":
             # --- Video-mode: build a narrated vertical video using the
@@ -3540,15 +3573,34 @@ def main():
             image_specs[-1]["duration"] += overflow  # CTA card absorbs the difference
 
             print(f"Building video from {len(image_specs)} real-image slide(s)...")
-            reel_video_bytes = build_reel_video(
-                image_specs, audio_path, work_dir=work_dir
-            )
-            reel_video_filename = f"decor-{ts}-reel.mp4"
-            reel_video_filepath = os.path.join("images", reel_video_filename)
-            with open(reel_video_filepath, "wb") as f:
-                f.write(reel_video_bytes)
-            reel_video_url = upload_to_r2(reel_video_filepath)
-            print(f"Video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
+            if USE_TEMPLATE_VIDEO:
+                # The template has its own call-to-action bar, so the closing
+                # slide reuses the hero photo instead of a blank text card.
+                image_specs[-1]["bytes"] = real_image_bytes[0]
+                tpl_top, tpl_bottom, tpl_highlight = template_bar_texts(draft)
+                tpl_music = pick_background_music()
+            # The 9:16 video is only used by Facebook/Instagram/TikTok; with those
+            # switched off, building it would just waste a minute.
+            need_reel_video = (not USE_TEMPLATE_VIDEO) or ENABLE_META or ENABLE_TIKTOK
+            if need_reel_video:
+                if USE_TEMPLATE_VIDEO:
+                    reel_video_bytes = video_template.build_template_video(
+                        image_specs, audio_path, work_dir, width=1080, height=1920,
+                        top_text=tpl_top, bottom_text=tpl_bottom, bottom_highlight=tpl_highlight,
+                        music_path=tpl_music,
+                    )
+                else:
+                    reel_video_bytes = build_reel_video(
+                        image_specs, audio_path, work_dir=work_dir
+                    )
+                reel_video_filename = f"decor-{ts}-reel.mp4"
+                reel_video_filepath = os.path.join("images", reel_video_filename)
+                with open(reel_video_filepath, "wb") as f:
+                    f.write(reel_video_bytes)
+                reel_video_url = upload_to_r2(reel_video_filepath)
+                print(f"Video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
+            else:
+                print("Skipping the 9:16 video (Facebook/Instagram/TikTok are switched off).")
 
             # A SECOND video, just for the Pinterest pin — same images,
             # captions, and voiceover, re-rendered at 2:3 instead of 9:16.
@@ -3560,10 +3612,17 @@ def main():
             # untouched by this — it stays exactly 9:16 as required.
             print("Building a 2:3 version for the Pinterest pin...")
             pinterest_work_dir = os.path.join("images", f"reel-work-pin-{ts}")
-            pinterest_video_bytes = build_reel_video(
-                image_specs, audio_path, work_dir=pinterest_work_dir,
-                width=1080, height=1620,
-            )
+            if USE_TEMPLATE_VIDEO:
+                pinterest_video_bytes = video_template.build_template_video(
+                    image_specs, audio_path, pinterest_work_dir, width=1080, height=1620,
+                    top_text=tpl_top, bottom_text=tpl_bottom, bottom_highlight=tpl_highlight,
+                    music_path=tpl_music,
+                )
+            else:
+                pinterest_video_bytes = build_reel_video(
+                    image_specs, audio_path, work_dir=pinterest_work_dir,
+                    width=1080, height=1620,
+                )
             print(f"Pinterest video ready ({len(pinterest_video_bytes) / 1024:.0f} KB).")
 
             # Pinterest's video-pin cover_image_url rejects WebP (every
