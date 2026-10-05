@@ -529,9 +529,9 @@ POST_FORMATS = [
      "table_hint": "a table with columns What to look for, Fair price, Red flags",
      "title_hint": "practical, e.g. 'What to Look For When Thrifting a Solid Wood Dresser'"},
     {"name": "mistakes and fixes", "weight": 2, "use_title_styles": False,
-     "instruction": "Common mistakes that make a room look cheap, cluttered or dated, each paired with a specific, inexpensive fix.",
+     "instruction": "Common mistakes that make a room look cheap, cluttered or dated, each paired with a specific, inexpensive fix. Costs are PER FIX: total_cost must be the range of the per-fix costs in your table, and any total you state in the text must equal the sum of the table.",
      "table_hint": "a table with columns Mistake, Quick fix, Cost",
-     "title_hint": "e.g. '6 Mistakes That Make Your Entryway Look Cluttered (and Cheap Fixes)'"},
+     "title_hint": "e.g. '6 Mistakes That Make Your Entryway Look Cluttered (and How to Fix Them)'. Never use the words 'cheap' twice in the title."},
     {"name": "project walkthrough with pitfalls", "weight": 2, "use_title_styles": True, "needs_list": True,
      "instruction": "A walkthrough of one makeover that is honest about what can go wrong: the common pitfalls at each step, how to avoid them, and what the finished result should look like. Written as a guide ('you'), NOT as a personal story.",
      "table_hint": "a table of what you bought and what it cost, columns Item, Price"},
@@ -1525,11 +1525,13 @@ def plan_photo_queries(draft, n_extra=4):
 def fix_listicle_cost(draft):
     """
     Listicle Quick Take showed "$25-$45" while the table's seven items added
-    up to $126. For listicles the cost is per idea, so total_cost is
-    rebuilt from the table's own prices: "$6-$30 per idea".
+    up to $126. For listicles ("per idea") and mistakes-and-fixes posts
+    ("per fix") the cost is per item, so total_cost is rebuilt from the
+    table's own prices: "$6-$30 per idea".
     """
     try:
-        if draft.get("_format") != "listicle":
+        unit = {"listicle": "per idea", "mistakes and fixes": "per fix"}.get(draft.get("_format"))
+        if not unit:
             return
         m = re.search(r"<table.*?</table>", draft.get("html", ""), re.DOTALL | re.IGNORECASE)
         if not m:
@@ -1539,7 +1541,7 @@ def fix_listicle_cost(draft):
             return
         lo, hi = min(amounts), max(amounts)
         fmt_amt = lambda v: f"${v:g}"
-        draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)} per idea" if lo != hi else f"{fmt_amt(lo)} per idea")
+        draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)} {unit}" if lo != hi else f"{fmt_amt(lo)} {unit}")
     except Exception as e:
         print(f"Listicle cost fix skipped ({e}).")
 
