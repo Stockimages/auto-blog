@@ -41,12 +41,25 @@ jobs:
           sudo apt-get install -y fonts-dejavu-core ffmpeg
           pip install -r requirements.txt
 
+      - name: Fonts for the video template (Anton + Poppins, free Google Fonts)
+        run: |
+          mkdir -p fonts
+          for f in "anton/Anton-Regular.ttf" "poppins/Poppins-ExtraBold.ttf"; do
+            out="fonts/$(basename "$f")"
+            [ -s "$out" ] || curl -fsSL -o "$out" "https://raw.githubusercontent.com/google/fonts/main/ofl/$f" || true
+            [ -s "$out" ] || rm -f "$out"
+          done
+          ls -la fonts || true
+
       - name: Generate article + image/video and publish to Blogger + Pinterest
         env:
           RUN_TYPE: ${{ inputs.run_type }}
           ENABLE_META: ${{ vars.ENABLE_META }}
           ENABLE_TIKTOK: ${{ vars.ENABLE_TIKTOK }}
           ENABLE_GOOGLE_INDEXING: ${{ vars.ENABLE_GOOGLE_INDEXING }}
+          VIDEO_STYLE: ${{ vars.VIDEO_STYLE }}
+          VOICE_ENGINE: ${{ vars.VOICE_ENGINE }}
+          GEMINI_TTS_MODEL: ${{ vars.GEMINI_TTS_MODEL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
