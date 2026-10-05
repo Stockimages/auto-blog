@@ -1,27 +1,27 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/10/a-cozy-bedroom-holiday-gift-refresh.html",
-    "timestamp": "2026-10-05T07:48:41.348101+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-10-05T13:33:20.517005+00:00"
   },
   "facebook": {
-    "success": null,
-    "timestamp": "2026-10-05T07:48:41.348101+00:00"
+    "success": false,
+    "timestamp": "2026-10-05T13:33:20.517005+00:00"
   },
   "pinterest": {
-    "success": true,
-    "timestamp": "2026-10-05T07:48:41.348101+00:00"
+    "success": false,
+    "timestamp": "2026-10-05T13:33:20.517005+00:00"
   },
   "instagram": {
-    "success": null,
-    "timestamp": "2026-10-05T07:48:41.348101+00:00"
+    "success": false,
+    "timestamp": "2026-10-05T13:33:20.517005+00:00"
   },
   "tumblr": {
-    "success": true,
-    "timestamp": "2026-10-05T07:48:41.348101+00:00"
+    "success": false,
+    "timestamp": "2026-10-05T13:33:20.517005+00:00"
   },
   "tiktok": {
     "success": null,
-    "timestamp": "2026-10-05T07:48:41.348101+00:00"
+    "timestamp": "2026-10-05T13:33:20.517005+00:00"
   }
 }
