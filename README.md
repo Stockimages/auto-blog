@@ -1,101 +1,91 @@
-# Auto Blog Publisher — setup (one-time)
+# DecorVibe Auto Blog Publisher
 
-This repo publishes a new budget-home-decor post to your Blogger blog every
-day, fully automatically: Gemini picks the topic, writes the article,
-generates a header image; the image is compressed and committed to this
-repo; the post goes live on Blogger. No clicking required after setup.
+Publishes budget home-decor posts automatically:
 
-## 1. Get a Gemini API key
-Google AI Studio -> Get API key. Copy it.
+1. **Gemini** picks a topic and writes the article (format and season vary).
+2. **Pexels** (and **Pixabay** as a fallback) supply real photos; Gemini checks
+   each photo actually matches the post.
+3. The post goes live on **Blogger**.
+4. A pin goes to **Pinterest** (image pin, or a video pin on video runs).
+5. A photo post goes to **Tumblr**.
+6. The new URL is sent to **Bing**, and an "All Posts" hub page on the blog is
+   refreshed so every post stays linked.
 
-## 2. Enable Blogger API + create a Desktop OAuth client
-1. Google Cloud Console -> select/create a project.
-2. APIs & Services -> Library -> enable **Blogger API v3**.
-3. APIs & Services -> OAuth consent screen -> set it up (External, add your
-   own email as a test user if it stays in "Testing" mode).
-4. APIs & Services -> Credentials -> Create Credentials -> OAuth client ID
-   -> Application type: **Desktop app**. Copy the Client ID and Client Secret.
+Facebook, Instagram, TikTok and YouTube are **not** used any more.
 
-## 3. Get your Blogger Blog ID
-Blogger dashboard -> Settings -> your Blog ID is shown there.
+## Run types
 
-## 4. Get a refresh token (one-time, on your own computer)
-```
-pip install google-auth-oauthlib
-```
-Open `get_refresh_token.py`, paste in your Client ID and Client Secret,
-then run:
-```
-python get_refresh_token.py
-```
-A browser tab opens — log in and approve. The refresh token prints in your
-terminal. Copy it.
+The workflow takes a `run_type` input:
 
-## 5. Create this repo on GitHub and push these files
-```
-git init
-git add .
-git commit -m "Auto blog publisher"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git push -u origin main
-```
+| run_type | What it does |
+|---|---|
+| `image` | Blogger post + Pinterest **image** pin + Tumblr |
+| `video` | Same, but the Pinterest pin is a **video** (2:3) with a Gemini voiceover (voice "Zephyr"), black bars, yellow highlighted words, 41 random photo transitions and a soft swoosh on each photo change |
 
-## 6. Add GitHub Secrets
-Repo -> Settings -> Secrets and variables -> Actions -> New repository secret.
-Add each of these:
+A scheduler such as cron-job.org triggers the workflow (`workflow_dispatch`) at
+the times you choose; you can also use **Actions -> Auto Blog Publisher -> Run
+workflow** by hand.
 
-| Secret name            | Value                                  |
-|-------------------------|-----------------------------------------|
-| `GEMINI_API_KEY`         | from step 1                             |
-| `BLOGGER_BLOG_ID`        | from step 3                             |
-| `GOOGLE_CLIENT_ID`       | from step 2                             |
-| `GOOGLE_CLIENT_SECRET`   | from step 2                             |
-| `GOOGLE_REFRESH_TOKEN`   | from step 4                             |
+## Files
 
-## 7. Turn on GitHub Pages (this gives you the control-panel website)
-Repo -> Settings -> Pages -> Source: "Deploy from a branch" -> Branch: `main`,
-folder: `/ (root)` -> Save. GitHub gives you a URL like:
-```
-https://YOUR_USERNAME.github.io/YOUR_REPO/
-```
-That page is `index.html` — the control panel. Open it.
+| File | Purpose |
+|---|---|
+| `auto_blog.py` | The whole pipeline |
+| `video_template.py` | Video look, transitions, swoosh sound, Gemini voice. If it is missing, `video` runs quietly become `image` runs |
+| `.github/workflows/auto-blog.yml` | The GitHub Actions workflow (also downloads the free Anton and Poppins fonts) |
+| `config.json` | The blog's niche/focus |
+| `requirements.txt` | Python packages |
+| `topics_history.json` | Every post made so far (topic, format, theme, URL, photo ids). **Don't delete** - it prevents repeats |
+| `bing_submitted.json` | URLs already sent to Bing |
+| `status.json` | Result of the last run (rewritten every run) |
+| `images/` | Older posts' images (before R2). Don't delete: those posts still point here |
+| `music/` | Background music for video runs |
 
-## 8. Connect the control panel
-1. Create a GitHub Personal Access Token: GitHub -> Settings -> Developer
-   settings -> Personal access tokens -> Fine-grained tokens -> New token.
-   Restrict it to **only this repo**. Under Permissions, set
-   **Actions: Read & write** and **Contents: Read & write**.
-2. Open your Pages URL from step 7, paste in the token and `owner/repo`,
-   click **Connect**.
-3. From there: **Start** turns the daily schedule on, **Stop** turns it off,
-   **Run once now** triggers an immediate test post, and you can edit the
-   blog's focus/niche and posting frequency right from the page. Recent runs
-   and their status show at the bottom, with a link to the full GitHub log
-   for each one.
+## GitHub Secrets
 
-The token is stored only in your own browser's local storage — it is never
-sent anywhere except directly to GitHub's API.
+Settings -> Secrets and variables -> Actions -> Secrets:
 
-## Pinterest note
-Since your Blogger blog auto-posts to Pinterest, every image now gets a
-bold text banner (a short punchy "pin_hook" Gemini writes, like a real
-Pinterest pin) added near the top automatically, and the image is generated
-in a vertical 2:3 shape — the format Pinterest favors. The article's opening
-paragraph is written as a standalone hook too, since Pinterest/search often
-show just that first line as the preview. Nothing extra to configure — this
-is baked into the generation step.
+| Group | Secrets |
+|---|---|
+| Gemini | `GEMINI_API_KEY` |
+| Blogger | `BLOGGER_BLOG_ID`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
+| Photos | `PEXELS_API_KEY`, `PIXABAY_API_KEY` (optional) |
+| Pinterest | `PINTEREST_APP_ID`, `PINTEREST_APP_SECRET`, `PINTEREST_REFRESH_TOKEN`, `PINTEREST_BOARD_ID` |
+| Tumblr | `TUMBLR_CONSUMER_KEY`, `TUMBLR_CONSUMER_SECRET`, `TUMBLR_ACCESS_TOKEN`, `TUMBLR_ACCESS_TOKEN_SECRET`, `TUMBLR_BLOG_NAME` |
+| Image hosting (Cloudflare R2) | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL` |
+| Bing | `BING_API_KEY` |
+| Email summary after each run | `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, `NOTIFY_EMAIL` |
+| Auto-updating the Pinterest token | `GH_SECRETS_PAT` |
 
-## Notes
-- If a run fails with a "model not found" error, Google renamed a model.
-  Check current names in Google AI Studio and update `GEMINI_TEXT_MODEL` /
-  `GEMINI_IMAGE_MODEL` (either edit the defaults in `auto_blog.py`, or add
-  them as extra repo secrets/variables with those exact names).
-- `topics_history.json` grows automatically so Gemini avoids repeating
-  itself. Don't delete it.
-- Nothing here reviews the post before it goes live. Worth skimming the
-  blog every few days, since fully unattended AI content can occasionally
-  drift off-topic or repeat a claim oddly even with the topic-history guard.
-- Anyone who gets your Personal Access Token could enable/disable the
-  workflow or edit files in this repo, so keep it private and scoped to
-  just this one repo (fine-grained tokens let you do that).
+Optional **Variables** (same page, Variables tab):
+
+| Variable | Effect |
+|---|---|
+| `VOICE_ENGINE` = `edge` | Skip Gemini's voice and use Edge-TTS only |
+| `GEMINI_TTS_MODEL` | Override the Gemini text-to-speech model name |
+
+## What the pipeline checks before publishing
+
+A draft is rejected and rewritten (up to 4 tries) if it:
+- is too short (under 600 words),
+- repeats the topic of an earlier post,
+- names a brand, store or branded product,
+- claims a personal experience ("I tried...", "my home...") that did not happen,
+- has no usable hero photo for its topic.
+
+If nothing could be published, the run waits 15 minutes and tries once more.
+You get an email either way.
+
+## Troubleshooting
+
+- **Run failed with "exhausted all attempts"** - Gemini's better models are out
+  of quota or overloaded; the log line shows the HTTP error. The lite models
+  write shorter articles that the checks above reject. Wait, and avoid many
+  manual runs in one day.
+- **"model not found"** - Google renamed a model. Update the model names in
+  `auto_blog.py` (the `GEMINI_*` defaults near the top).
+- **Pinterest token** - refreshed and saved back to `PINTEREST_REFRESH_TOKEN`
+  automatically (needs `GH_SECRETS_PAT`).
+- **A post disappeared** - Blogger can unpublish a post for a guideline
+  issue. You will get an email if an auto-post turns into a Draft.
+- Skim the blog every few days: unattended AI content can still drift.
