@@ -1,27 +1,27 @@
 {
   "blogger": {
-    "success": false,
-    "url": null,
-    "timestamp": "2026-10-05T19:09:54.591350+00:00"
+    "success": true,
+    "url": "https://www.decorvibeto.com/2026/10/the-designer-thanksgiving-table-look.html",
+    "timestamp": "2026-10-06T01:38:29.537961+00:00"
   },
   "facebook": {
-    "success": false,
-    "timestamp": "2026-10-05T19:09:54.591350+00:00"
+    "success": null,
+    "timestamp": "2026-10-06T01:38:29.537961+00:00"
   },
   "pinterest": {
-    "success": false,
-    "timestamp": "2026-10-05T19:09:54.591350+00:00"
+    "success": true,
+    "timestamp": "2026-10-06T01:38:29.537961+00:00"
   },
   "instagram": {
-    "success": false,
-    "timestamp": "2026-10-05T19:09:54.591350+00:00"
+    "success": null,
+    "timestamp": "2026-10-06T01:38:29.537961+00:00"
   },
   "tumblr": {
-    "success": false,
-    "timestamp": "2026-10-05T19:09:54.591350+00:00"
+    "success": true,
+    "timestamp": "2026-10-06T01:38:29.537961+00:00"
   },
   "tiktok": {
     "success": null,
-    "timestamp": "2026-10-05T19:09:54.591350+00:00"
+    "timestamp": "2026-10-06T01:38:29.537961+00:00"
   }
 }
