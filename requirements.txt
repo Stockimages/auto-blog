@@ -1,6 +1,5 @@
 requests
 Pillow
-google-auth
 pynacl
 boto3
 requests-oauthlib
