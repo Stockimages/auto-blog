@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_type:
-        description: 'image (morning: carousel/link/image-pin) or video (evening: Reel/video/video-pin)'
+        description: 'image (image pin) or video (video pin with voiceover)'
         required: false
         default: 'image'
         type: choice
@@ -54,10 +54,6 @@ jobs:
       - name: Generate article + image/video and publish to Blogger + Pinterest
         env:
           RUN_TYPE: ${{ inputs.run_type }}
-          ENABLE_META: ${{ vars.ENABLE_META }}
-          ENABLE_TIKTOK: ${{ vars.ENABLE_TIKTOK }}
-          ENABLE_GOOGLE_INDEXING: ${{ vars.ENABLE_GOOGLE_INDEXING }}
-          VIDEO_STYLE: ${{ vars.VIDEO_STYLE }}
           VOICE_ENGINE: ${{ vars.VOICE_ENGINE }}
           GEMINI_TTS_MODEL: ${{ vars.GEMINI_TTS_MODEL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -71,7 +67,6 @@ jobs:
           PINTEREST_APP_SECRET: ${{ secrets.PINTEREST_APP_SECRET }}
           PINTEREST_REFRESH_TOKEN: ${{ secrets.PINTEREST_REFRESH_TOKEN }}
           PINTEREST_BOARD_ID: ${{ secrets.PINTEREST_BOARD_ID }}
-          GOOGLE_INDEXING_KEY: ${{ secrets.GOOGLE_INDEXING_KEY }}
           BING_API_KEY: ${{ secrets.BING_API_KEY }}
           TUMBLR_CONSUMER_KEY: ${{ secrets.TUMBLR_CONSUMER_KEY }}
           TUMBLR_CONSUMER_SECRET: ${{ secrets.TUMBLR_CONSUMER_SECRET }}
@@ -79,13 +74,6 @@ jobs:
           TUMBLR_ACCESS_TOKEN_SECRET: ${{ secrets.TUMBLR_ACCESS_TOKEN_SECRET }}
           TUMBLR_BLOG_NAME: ${{ secrets.TUMBLR_BLOG_NAME }}
           GH_SECRETS_PAT: ${{ secrets.GH_SECRETS_PAT }}
-          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
-          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
-          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
-          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
-          FACEBOOK_PAGE_ACCESS_TOKEN: ${{ secrets.FACEBOOK_PAGE_ACCESS_TOKEN }}
-          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
-          INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
