@@ -335,6 +335,9 @@ _TITLE_FILLER = {
     "ways", "tips", "things", "mistakes", "hacks", "secrets", "decor", "decorating",
     "home", "fall", "autumn", "cozy", "winter", "summer", "spring", "christmas",
     "holiday", "holidays", "halloween", "thanksgiving", "easter", "season", "seasonal",
+    # words of the post FORMATS themselves ("... in 4 Simple Layers" is a template, not a topic)
+    "layer", "layers", "simple", "style", "styled", "styling", "elegant", "perfect", "beautiful",
+    "stunning", "gorgeous", "ultimate", "complete", "essential",
 }
 
 
@@ -370,8 +373,11 @@ def find_duplicate_title(title, history, threshold=0.5):
         old_kw = _title_keywords(old_title)
         if not old_kw:
             continue
-        overlap = len(new_kw & old_kw) / len(new_kw | old_kw)
-        if overlap >= threshold:
+        shared = len(new_kw & old_kw)
+        overlap = shared / len(new_kw | old_kw)
+        # Two shared topic words are needed (or identical one-word topics): a single
+        # shared word such as "table" doesn't make a bedside table a Thanksgiving table.
+        if (shared >= 2 and overlap >= threshold) or (overlap == 1.0 and shared >= 1):
             return old_title
     return None
 
@@ -500,7 +506,7 @@ POST_FORMATS = [
     {"name": "tested and myth-busting", "weight": 1, "use_title_styles": False,
      "instruction": "Test a popular budget decor trick or product type (chalk paint, peel-and-stick, thrifted rugs, thrifted lamps) and report honestly what worked and what didn't.",
      "table_hint": "a table with columns Method, Result, Verdict",
-     "title_hint": "a curious question or honest verdict, e.g. 'Does Peel-and-Stick Backsplash Really Last? What I Learned'"},
+     "title_hint": "a curious question or honest verdict, e.g. 'Does Peel-and-Stick Backsplash Really Last? What Actually Happens Over Time'. Never write the title in the first person (no 'I' or 'my')."},
 ]
 
 # month -> (themes for right now, themes for roughly the next 4-6 weeks).
@@ -878,11 +884,15 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
     # trying 6 different ones is far more likely to land a working one than retrying a single
     # model repeatedly. The two "-lite" models at the end have a much higher daily quota than
     # the regular flash models, so they're kept as the last resort.
-    models_to_try = [TEXT_MODEL]
-    for fallback in [FALLBACK_TEXT_MODEL, FALLBACK_TEXT_MODEL_2, FALLBACK_TEXT_MODEL_3,
-                      FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5]:
-        if fallback and fallback not in models_to_try:
-            models_to_try.append(fallback)
+    top_models = []
+    for m in [TEXT_MODEL, FALLBACK_TEXT_MODEL, FALLBACK_TEXT_MODEL_2, FALLBACK_TEXT_MODEL_3]:
+        if m and m not in top_models:
+            top_models.append(m)
+    lite_models = [m for m in [FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5] if m and m not in top_models]
+    # "High demand" (HTTP 503) spikes usually pass within a minute, and the lite models write
+    # noticeably shorter, less obedient articles, so the top models get a second pass after a
+    # short wait before falling back to the lite ones.
+    models_to_try = top_models + ["__WAIT__"] + top_models + lite_models
 
     last_error = None
     num_cycles = 1  # one pass through the whole model list — with 6 models to try, each
@@ -894,6 +904,12 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
         is_last_cycle = cycle == num_cycles
 
         for model_index, model in enumerate(models_to_try):
+            if model == "__WAIT__":
+                if any(m not in _DEAD_MODELS for m in top_models):
+                    wait = int(os.environ.get("GEMINI_TOP_RETRY_SECONDS", "45"))
+                    print(f"The top Gemini models are busy — waiting {wait}s, then trying them once more...")
+                    time.sleep(wait)
+                continue
             if model in _DEAD_MODELS and model_index < len(models_to_try) - 1:
                 continue
             is_last_model = model_index == len(models_to_try) - 1
