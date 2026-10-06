@@ -42,8 +42,6 @@ from datetime import datetime, timezone
 import requests
 from requests_oauthlib import OAuth1Session
 import edge_tts
-from google.oauth2 import service_account
-from google.auth.transport.requests import Request as GoogleAuthRequest
 from PIL import Image, ImageDraw, ImageFont
 
 # ---- Required secrets / env vars (set these as GitHub Actions secrets) ----
@@ -57,10 +55,6 @@ PEXELS_API_KEY = os.environ["PEXELS_API_KEY"]
 # Optional second photo source, used when every Pexels candidate is rejected.
 PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
 
-# Service-account JSON (full contents) for the Google Indexing API — lets us
-# tell Google to (re)crawl a new post immediately instead of waiting for it
-# to be discovered via the sitemap on its own schedule.
-GOOGLE_INDEXING_KEY = os.environ.get("GOOGLE_INDEXING_KEY")
 
 # Bing Webmaster Submission API key — lets us tell Bing to (re)crawl a new
 # post immediately. Bing's own index also powers Yahoo and DuckDuckGo
@@ -78,14 +72,6 @@ PINTEREST_APP_SECRET = os.environ["PINTEREST_APP_SECRET"]
 PINTEREST_REFRESH_TOKEN = os.environ["PINTEREST_REFRESH_TOKEN"]
 PINTEREST_BOARD_ID = os.environ["PINTEREST_BOARD_ID"]
 
-# TikTok — auto-posts the 9:16 video on RUN_TYPE=video runs. The access token
-# only lasts 24h, so every run exchanges TIKTOK_REFRESH_TOKEN for a fresh one;
-# if TikTok rotates the refresh token, it's saved back to the GitHub secret
-# automatically (same mechanism as Pinterest) — no manual steps.
-TIKTOK_CLIENT_KEY = os.environ.get("TIKTOK_CLIENT_KEY")
-TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
-TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
-
 
 try:
     import video_template   # the black-bars/yellow-words template (video_template.py next to this file)
@@ -93,33 +79,9 @@ except ImportError:
     video_template = None
 
 
-def env_flag(name):
-    """True only if the env var is set to 1/true/yes/on (anything else = off)."""
-    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
-
-
-# On/off switches, set as GitHub repo *Variables* (Settings -> Secrets and
-# variables -> Actions -> Variables) so they can be flipped without editing
-# code. Both default to OFF, so a locked Meta account or a pending TikTok
-# audit can never cause red-cross emails or failed runs.
-#   ENABLE_META   = true  -> post to Facebook + Instagram (needs a valid token)
-#   ENABLE_TIKTOK = true  -> post the video to TikTok (needs audited Direct Post)
-ENABLE_META = env_flag("ENABLE_META")
-ENABLE_TIKTOK = env_flag("ENABLE_TIKTOK")
-#   ENABLE_GOOGLE_INDEXING = true -> also call Google's Indexing API per post.
-#   Off by default: Google only supports that API for JobPosting/livestream
-#   pages, so for blog posts it doesn't speed anything up and misuse can get
-#   API access revoked. Google finds posts through the sitemap + hub page.
-ENABLE_GOOGLE_INDEXING = env_flag("ENABLE_GOOGLE_INDEXING")
-# Video look: "template" (black bars, yellow words, 41 transitions, swoosh) is the
-# default when video_template.py is present; set VIDEO_STYLE=classic to go back.
-USE_TEMPLATE_VIDEO = video_template is not None and os.environ.get("VIDEO_STYLE", "template").strip().lower() != "classic"
 # Voice: Gemini "Zephyr" first, Edge-TTS as automatic fallback; VOICE_ENGINE=edge skips Gemini.
 USE_GEMINI_VOICE = video_template is not None and os.environ.get("VOICE_ENGINE", "gemini").strip().lower() != "edge"
 
-# Facebook Page — auto-posts a link to the Page right after each Blogger post.
-FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
-FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
 
 # Tumblr — auto-posts a photo pointing back to each new Blogger post.
 # Unlike Medium, Tumblr's OAuth 1.0a API is still open/self-service, so this
@@ -137,12 +99,6 @@ GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", GMAIL_ADDRESS)
 
-# Instagram Business account — auto-posts the hero image right after each
-# Blogger post. INSTAGRAM_ACCESS_TOKEN is a Facebook Page Access Token
-# (derived from a long-lived user token via Graph API Explorer), which
-# doesn't expire on its own — no refresh logic needed, unlike Pinterest.
-INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID")
-INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
 
 # Auto-set by GitHub Actions as "owner/repo". Falls back for local testing.
 GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "your-username/your-repo")
@@ -206,9 +162,8 @@ def delete_from_r2(local_path):
     """
     Deletes a file from the R2 bucket by the same key upload_to_r2 used
     (the local path, forward-slashed). Called at the end of a run for
-    everything that was only ever needed ONCE — Facebook/Instagram/
-    Pinterest/TikTok all fetch a file from its R2 URL and keep their own
-    copy, so once posting is done there's nothing left pointing at it.
+    everything that was only ever needed ONCE — Pinterest fetches the
+    file from its R2 URL and keeps its own copy, so once posting is done there's nothing left pointing at it.
     The hero image is the one exception (Blogger's post keeps embedding
     that exact URL forever), so it's never passed here. Never raises —
     a cleanup failure should never turn a successful run into a failed
@@ -239,6 +194,9 @@ def delete_from_r2(local_path):
 # Edge-TTS), so the content-matching problem this override existed for no
 # longer applies. Re-enabled as of the voiceover rewrite.
 RUN_TYPE = os.environ.get("RUN_TYPE", "image").strip().lower()
+if RUN_TYPE == "video" and video_template is None:
+    print("video_template.py is missing — running as an image run instead of a video run.")
+    RUN_TYPE = "image"
 
 # Model name — Google updates these periodically. If a run starts failing
 # with a 404 "model not found" error, check the current name in Google AI
@@ -290,21 +248,6 @@ CATEGORY_BOARD_IDS = {
     "General Decor": "1123014925773074374",
 }
 
-# A small, fixed set of emoji used ONLY in Facebook/Instagram captions (never
-# in the hook line itself, and never on Pinterest or Blogger — both of those
-# are search-driven platforms where 2026 best practice is to stay
-# emoji-free and keyword-focused; Facebook/Instagram are scroll-feed
-# platforms where 2-3 tasteful emoji measurably help engagement/CTR).
-CATEGORY_EMOJIS = {
-    "Living Room": "🛋️",
-    "Bedroom": "🛏️",
-    "Kitchen": "🍽️",
-    "Bathroom": "🛁",
-    "Small Spaces": "📦",
-    "Entryway": "🚪",
-    "Outdoor": "🌿",
-    "General Decor": "🏠",
-}
 
 # Words/phrases that make AI writing sound canned. Gemini is told to avoid these.
 BANNED_PHRASES = [
@@ -663,6 +606,11 @@ def pick_post_plan(history, today=None):
     return {"fmt": fmt, "theme": theme, "season_line": season_line, "style_line": style_line}
 
 
+# Models that answered 429 (rate limit / quota) are skipped for the rest of the
+# run, so retries after a rejected draft don't re-knock on doors that are shut.
+_DEAD_MODELS = set()
+
+
 def generate_draft(history, niche):
     # Duplicate-topic avoidance window: at ~2 posts/day, checking only the
     # last 50 titles covers ~25 days — past that, older topics could start
@@ -871,7 +819,7 @@ Also write:
   horizontal photo matching that section of the article, written the same
   short, noun-first way as image_prompt above — no people's faces, no text).
 - "reel_script": a short spoken-word voiceover script for a ~18-22 second
-  vertical video (Instagram Reel / TikTok), 45-65 words total, written to be
+  vertical video (a Pinterest video pin), 45-65 words total, written to be
   read aloud by an AI voice — NOT the article text, and do NOT include any
   call-to-action or "link"/"website"/"bio" line (that's added separately).
   Structure:
@@ -901,7 +849,7 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "category": "EXACTLY one of the fixed categories listed above",
   "pin_description": "...",
   "pin_hook": "...",
-  "hashtag_tags": ["8-12 short descriptive style/content tags for social hashtags only (Instagram/Facebook use more of these than Pinterest does), e.g. thrift flip, diy, budget decor, home makeover, thrifted finds — these do NOT affect the site's category"],
+  "hashtag_tags": ["8-12 short descriptive style/content tags for Pinterest/Tumblr hashtags only, e.g. thrift flip, diy, budget decor, home makeover, thrifted finds — these do NOT affect the site's category"],
   "total_cost": "e.g. $26",
   "time_estimate": "e.g. 1 hour",
   "difficulty": "Easy, Moderate, or Advanced",
@@ -946,6 +894,8 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
         is_last_cycle = cycle == num_cycles
 
         for model_index, model in enumerate(models_to_try):
+            if model in _DEAD_MODELS and model_index < len(models_to_try) - 1:
+                continue
             is_last_model = model_index == len(models_to_try) - 1
             is_final_attempt_ever = is_last_model and is_last_cycle  # only raise once we're truly out of options
 
@@ -978,6 +928,8 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                         if isinstance(parsed, dict):
                             parsed["_format"] = fmt["name"]
                             parsed["_theme"] = plan["theme"]
+                            parsed["_model"] = model
+                        print(f"Article written by {model}.")
                         return parsed
                     except json.JSONDecodeError as e:
                         last_error = f"invalid JSON: {e}"
@@ -1008,7 +960,9 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                           f"(attempt {attempt}/{max_attempts})...")
                     time.sleep(delay)
                 else:
-                    print(f"[{model}] exhausted all attempts, switching to fallback model...")
+                    print(f"[{model}] exhausted all attempts ({last_error[:150]}), switching to fallback model...")
+                if res.status_code == 429:
+                    _DEAD_MODELS.add(model)
 
         if not is_last_cycle:
             print(f"All models exhausted on cycle {cycle}/{num_cycles} — Gemini may be having a "
@@ -1613,153 +1567,6 @@ def _load_bold_font(size):
     return ImageFont.load_default()
 
 
-def search_pexels_video(query, orientation="portrait", min_duration=3, max_duration=25):
-    """
-    Finds a real Pexels stock video clip matching `query` — generic
-    topic-matching b-roll (not footage of this specific fictional project,
-    same honesty scope as the stock photos used elsewhere in this script)
-    — and downloads the smallest file that's still at least 720p, to keep
-    runs fast.
-    """
-    res = robust_request(
-        "GET", "https://api.pexels.com/videos/search",
-        headers={"Authorization": PEXELS_API_KEY},
-        params={"query": query, "orientation": orientation, "per_page": 15},
-        timeout=30,
-    )
-    if not res.ok:
-        raise RuntimeError(f"Pexels video search failed ({res.status_code}): {res.text}")
-
-    videos = [
-        v for v in res.json().get("videos", [])
-        if min_duration <= v.get("duration", 0) <= max_duration
-    ]
-    if not videos:
-        res = robust_request(
-            "GET", "https://api.pexels.com/videos/search",
-            headers={"Authorization": PEXELS_API_KEY},
-            params={"query": "home decor", "orientation": orientation, "per_page": 15},
-            timeout=30,
-        )
-        if not res.ok:
-            raise RuntimeError(f"Pexels video fallback search failed ({res.status_code}): {res.text}")
-        videos = [
-            v for v in res.json().get("videos", [])
-            if min_duration <= v.get("duration", 0) <= max_duration
-        ]
-        if not videos:
-            raise RuntimeError(f"No suitable Pexels videos found for query: {query}")
-
-    video = random.choice(videos)
-    # Pick the smallest file that's still HD (720p+), to keep downloads and
-    # ffmpeg processing fast — we re-encode everything anyway, so starting
-    # resolution beyond 1080p is wasted bandwidth.
-    hd_files = [f for f in video["video_files"] if (f.get("height") or 0) >= 720]
-    candidates = sorted(hd_files or video["video_files"], key=lambda f: f.get("width", 0))
-    file_info = candidates[0]
-
-    video_res = robust_request("GET", file_info["link"], timeout=60)
-    if not video_res.ok:
-        raise RuntimeError(f"Pexels video download failed ({video_res.status_code})")
-    return video_res.content
-
-
-def build_caption_overlay_png(text, width=1080, position="top", is_cta=False):
-    """
-    Renders a caption as a transparent PNG with word-wrapping, drawn word
-    by word (not PIL's built-in multiline_text) so dollar amounts like
-    "$20" can be highlighted in gold while the rest of the line stays
-    white — the price/transformation number is this niche's biggest
-    scroll-stopper, so it needs to visually pop, not blend in.
-
-    is_cta=True renders the closing "visit our website" slide with a
-    bigger font and a solid accent background bar instead of the usual
-    semi-transparent one, so it reads as a clear call-to-action rather
-    than just another step caption.
-
-    Vertical position is nudged down from the very top edge (rather than
-    flush against it) to stay clear of Instagram/TikTok's own UI chrome
-    (status area, sound name) — the "safe zone" for on-screen text.
-    """
-    price_re = re.compile(r"\$[\d,]+(?:\.\d+)?")
-    display_text = text.upper() if (position == "top" and not is_cta) else text
-
-    font_size = 58 if is_cta else (50 if position == "top" else 44)
-    font = _load_bold_font(font_size)
-    accent_color = (255, 205, 60, 255)   # gold — for price highlights
-    text_color = (20, 20, 20, 255) if is_cta else (255, 255, 255, 255)
-    bg_color = (255, 205, 60, 235) if is_cta else (0, 0, 0, 150)
-
-    dummy_img = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(dummy_img)
-    space_w = draw.textlength(" ", font=font)
-
-    # Manual word-wrap so we can track each word's color individually.
-    max_line_width = width - 100
-    words = display_text.split()
-    lines, current_line, current_w = [], [], 0
-    for word in words:
-        w = draw.textlength(word, font=font)
-        if current_line and current_w + space_w + w > max_line_width:
-            lines.append(current_line)
-            current_line, current_w = [], 0
-        current_line.append(word)
-        current_w += (space_w if len(current_line) > 1 else 0) + w
-    if current_line:
-        lines.append(current_line)
-
-    ascent, descent = font.getmetrics()
-    line_h = ascent + descent
-    spacing = 10
-    text_h = len(lines) * line_h + (len(lines) - 1) * spacing
-    pad_v = 30 if is_cta else 26
-    bar_h = text_h + pad_v * 2
-
-    img = Image.new("RGBA", (width, bar_h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([(0, 0), (width, bar_h)], fill=bg_color)
-
-    y = pad_v
-    for line in lines:
-        line_w = sum(draw.textlength(w, font=font) for w in line) + space_w * (len(line) - 1)
-        x = (width - line_w) / 2
-        for word in line:
-            color = accent_color if (price_re.fullmatch(word.strip(".,!?")) and not is_cta) else text_color
-            draw.text((x, y), word, font=font, fill=color)
-            x += draw.textlength(word, font=font) + space_w
-        y += line_h + spacing
-
-    out = BytesIO()
-    img.save(out, format="PNG")
-    return out.getvalue()
-
-
-def build_watermark_overlay_png(brand_text="DecorVibe", canvas_size=(1080, 1920)):
-    """
-    Small, permanent, semi-transparent brand watermark composited onto
-    every frame of the reel — placed top-right, away from Instagram/
-    TikTok's own bottom UI chrome (caption/username/audio strip) and away
-    from the main caption text (top-center), so it never collides with
-    either. Travels with the video if it's ever reposted or screen-
-    recorded without credit.
-    """
-    font = _load_bold_font(30)
-    img = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    text = brand_text
-    text_w = draw.textlength(text, font=font)
-    margin = 36
-    x = canvas_size[0] - text_w - margin
-    y = margin
-    # Faint shadow for legibility over any background, then the text itself.
-    draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 110))
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 170))
-    out = BytesIO()
-    img.save(out, format="PNG")
-    return out.getvalue()
-
-
-
 REEL_VOICES = ["en-US-AvaMultilingualNeural", "en-US-EmmaMultilingualNeural", "en-US-JennyNeural"]
 
 # Rotates randomly per video (see the video-mode block in main()) instead
@@ -1871,163 +1678,6 @@ def split_script_into_captions(script_text, n_parts):
         return chunks[:n_parts]
 
 
-def build_reel_video(image_specs, audio_path, work_dir, width=1080, height=1920):
-    """
-    Builds a vertical MP4 (default 1080x1920, 9:16 — Instagram/Facebook's
-    required reel shape; pass width=1080, height=1620 for a 2:3 version,
-    which is Pinterest's own best-performing ratio) from real project
-    images (hero + section photos + a closing CTA card), each with a slow
-    Ken Burns zoom, a synced on-screen caption, and short fade in/out
-    transitions — narrated by an AI voiceover (see synthesize_voiceover)
-    instead of being silent.
-
-    `image_specs` is a list of dicts:
-      {"bytes": <image bytes>, "caption": str or None, "duration": seconds}
-    Durations should already sum to ~the voiceover's length (the caller
-    computes this from get_audio_duration_seconds + word-weighted splits).
-
-    Called twice per video-mode run — once at the default 9:16 for
-    Instagram Reels/Facebook video, once at 2:3 for the Pinterest video
-    pin (Pinterest fully supports 9:16 too, but 2:3 is its own officially
-    best-performing ratio, and forcing the 9:16 file into a 2:3 pin
-    container was the cause of the black letterboxing bars). Returns the
-    final MP4 bytes. Raises on any ffmpeg failure (caller decides the
-    fallback).
-    """
-    os.makedirs(work_dir, exist_ok=True)
-    fps = 30
-    segment_paths = []
-    scale_w, scale_h = width * 3, height * 3  # upscale factor before zoompan, same ratio as the target
-
-    watermark_path = os.path.join(work_dir, "watermark.png")
-    with open(watermark_path, "wb") as f:
-        f.write(build_watermark_overlay_png(canvas_size=(width, height)))
-
-    for i, spec in enumerate(image_specs):
-        img_path = os.path.join(work_dir, f"img_{i}.png")
-        with open(img_path, "wb") as f:
-            f.write(spec["bytes"])
-
-        duration = max(0.8, spec["duration"])
-        frames = max(1, int(round(duration * fps)))
-        fade_dur = min(0.3, duration / 4)
-        is_cta = bool(spec.get("is_cta"))
-        is_first_slide = (i == 0)
-
-        # Zoom rate is calculated PER SLIDE (target zoom reached, right at
-        # the slide's own last frame) rather than a fixed rate — a fixed
-        # rate reaches its zoom cap early on any longer slide and then
-        # visibly freezes/holds still for the remainder, which is exactly
-        # what looked "stuck" before. This keeps the pan/zoom continuously
-        # moving for the slide's entire on-screen duration, however long
-        # or short that slide happens to be.
-        target_zoom = 1.15
-        zoom_rate = (target_zoom - 1.0) / frames
-        zoom_vf = (
-            # Real photos rarely come in exactly the 9:16 (0.5625) ratio
-            # this video needs — a suitcase photo above was 2:3 (0.667),
-            # for example. Forcing "scale=W:H" to an exact target size
-            # ignores the source's own ratio and stretches/squishes it.
-            # "force_original_aspect_ratio=increase" instead scales up
-            # UNIFORMLY until the image at least covers the 9:16 box, then
-            # "crop" trims the overflow to the exact box — same idea as
-            # object-fit: cover in CSS. No distortion, whatever the
-            # source photo's original shape was.
-            f"scale={scale_w}:{scale_h}:force_original_aspect_ratio=increase,"
-            f"crop={scale_w}:{scale_h},"
-            f"zoompan=z='min(zoom+{zoom_rate:.8f},{target_zoom})':d={frames}:"
-            f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps},"
-            + ("" if is_first_slide else f"fade=t=in:st=0:d={fade_dur},")
-            + f"fade=t=out:st={max(0, duration - fade_dur)}:d={fade_dur}"
-        )
-
-        seg_path = os.path.join(work_dir, f"seg_{i}.mp4")
-        caption_png_path = None
-        if spec.get("caption"):
-            caption_png_path = os.path.join(work_dir, f"caption_{i}.png")
-            with open(caption_png_path, "wb") as f:
-                f.write(build_caption_overlay_png(spec["caption"], is_cta=is_cta))
-
-        # Safe-zone caption position: nudged below the very top edge for
-        # normal step captions; the closing CTA card gets its (bigger,
-        # bolder) caption centered vertically so it reads as a clear final
-        # call-to-action rather than just another step. Either way it
-        # stays clear of Instagram/TikTok's own bottom UI chrome
-        # (caption/username/audio strip), which is the part most likely to
-        # cover on-screen text if it's placed too low.
-        caption_y = "H*0.42" if is_cta else "H*0.12"
-
-        if caption_png_path:
-            cmd = [
-                "ffmpeg", "-y", "-loop", "1", "-i", img_path,
-                "-i", caption_png_path, "-i", watermark_path, "-t", str(duration),
-                "-filter_complex",
-                f"[0:v]{zoom_vf}[bg];"
-                f"[bg][1:v]overlay=0:{caption_y}[bg2];"
-                f"[bg2][2:v]overlay=0:0[out]",
-                "-map", "[out]", "-an",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
-            ]
-        else:
-            cmd = [
-                "ffmpeg", "-y", "-loop", "1", "-i", img_path,
-                "-i", watermark_path, "-t", str(duration),
-                "-filter_complex", f"[0:v]{zoom_vf}[bg];[bg][1:v]overlay=0:0[out]",
-                "-map", "[out]", "-an",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23", seg_path,
-            ]
-        subprocess.run(cmd, check=True, capture_output=True)
-        segment_paths.append(seg_path)
-
-    concat_list_path = os.path.join(work_dir, "concat.txt")
-    with open(concat_list_path, "w") as f:
-        for p in segment_paths:
-            f.write(f"file '{os.path.abspath(p)}'\n")
-
-    silent_video_path = os.path.join(work_dir, "silent.mp4")
-    subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path,
-         "-c:v", "libx264", "-preset", "fast", "-crf", "23", silent_video_path],
-        check=True, capture_output=True,
-    )
-
-    final_path = os.path.join(work_dir, "final.mp4")
-    music_path = pick_background_music()
-
-    if music_path:
-        # Loop the track to at least cover the voiceover's length, then mix
-        # it in well below the voice (0.12x) so it's felt as ambience, not
-        # heard as competing audio — the voice must always stay the clear,
-        # dominant track since it carries the actual information.
-        print(f"Mixing in background music: {os.path.basename(music_path)}")
-        subprocess.run(
-            ["ffmpeg", "-y",
-             "-i", silent_video_path, "-i", audio_path,
-             "-stream_loop", "-1", "-i", music_path,
-             "-filter_complex",
-             "[2:a]volume=0.12[music];[1:a][music]amix=inputs=2:duration=first:dropout_transition=0[mixed]",
-             "-map", "0:v", "-map", "[mixed]",
-             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-             "-shortest", "-movflags", "+faststart",
-             final_path],
-            check=True, capture_output=True,
-        )
-    else:
-        subprocess.run(
-            ["ffmpeg", "-y",
-             "-i", silent_video_path, "-i", audio_path,
-             "-map", "0:v", "-map", "1:a",
-             "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-             "-shortest", "-movflags", "+faststart",
-             final_path],
-            check=True, capture_output=True,
-        )
-
-    with open(final_path, "rb") as f:
-        return f.read()
-
-
-
 def crop_to_ratio(img, target_ratio=2 / 3):
     """
     Center-crops an image to a fixed width:height ratio (default 2:3, Pinterest's
@@ -2092,47 +1742,6 @@ def finalize_pin_image(raw_image_bytes, hook_text, max_width=1200, quality=78, t
         )
     out = BytesIO()
     img_with_text.save(out, format="WEBP", quality=quality)
-    return out.getvalue()
-
-
-def build_text_card(lines, size=(1080, 1350), bg_color=(45, 38, 32), accent_color=(176, 141, 87)):
-    """
-    Builds a plain solid-background slide with centered text — used for the
-    Instagram carousel's "quick take" and "link in bio" info slides. No
-    photo needed (no extra Pexels call), just PIL drawing text on a card.
-    `lines` is a list of (text, is_title) tuples; title lines get a larger
-    bold font and an accent-colored underline beneath them.
-    """
-    img = Image.new("RGB", size, bg_color)
-    draw = ImageDraw.Draw(img)
-
-    title_font = _load_bold_font(int(size[0] * 0.09))
-    body_font = _load_bold_font(int(size[0] * 0.05))
-
-    blocks = []
-    total_h = 0
-    for text, is_title in lines:
-        font = title_font if is_title else body_font
-        wrapped = textwrap.fill(text.upper() if is_title else text, width=18)
-        bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=10, align="center")
-        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        blocks.append((wrapped, font, bbox, w, h, is_title))
-        total_h += h + 40
-
-    y = (size[1] - total_h) / 2
-    for wrapped, font, bbox, w, h, is_title in blocks:
-        x = (size[0] - w) / 2 - bbox[0]
-        draw.multiline_text((x, y - bbox[1]), wrapped, font=font, fill="white", align="center", spacing=10)
-        if is_title:
-            underline_y = y + h + 12
-            draw.rectangle(
-                [(size[0] - w) / 2, underline_y, (size[0] + w) / 2, underline_y + 4],
-                fill=accent_color,
-            )
-        y += h + 40
-
-    out = BytesIO()
-    img.save(out, format="WEBP", quality=82)
     return out.getvalue()
 
 
@@ -2298,12 +1907,10 @@ def build_pin_hashtags(labels, max_tags=5):
 def extract_pin_description(html, hashtags="", max_length=500, cta="", override=None):
     """
     Pulls plain text from the article's opening <p> (the hook paragraph)
-    to use as the Pinterest/Facebook/Instagram description — a genuine
+    to use as the Pinterest/Tumblr description — a genuine
     excerpt of the content, not just a repeat of the title or the on-image
     text overlay. Always ends with "...", whether it was truncated for
-    length or not, then an optional CTA line (matching the "Visit our
-    website" line already used in the Facebook/Instagram captions — added
-    here too for consistency), then hashtags (if provided) — all within
+    length or not, then an optional CTA line, then hashtags (if provided) — all within
     the length limit.
     """
     if override and override.strip():
@@ -2414,179 +2021,6 @@ def create_pinterest_video_pin(access_token, board_id, title, description, link,
     if not pin_res.ok:
         raise RuntimeError(f"Pinterest video pin creation failed ({pin_res.status_code}): {pin_res.text}")
     return pin_res.json()
-
-
-def get_tiktok_access_token():
-    """
-    Exchanges the stored TikTok refresh token for a fresh 24h access token.
-    If TikTok returns a different refresh_token, the GitHub secret is updated
-    automatically so the chain never breaks. Raises on failure (caller wraps).
-    """
-    res = robust_request(
-        "POST", "https://open.tiktokapis.com/v2/oauth/token/",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data={
-            "client_key": TIKTOK_CLIENT_KEY,
-            "client_secret": TIKTOK_CLIENT_SECRET,
-            "grant_type": "refresh_token",
-            "refresh_token": TIKTOK_REFRESH_TOKEN,
-        },
-        timeout=30,
-    )
-    data = res.json() if res.content else {}
-    if not res.ok or "access_token" not in data:
-        raise RuntimeError(f"Could not refresh TikTok access token ({res.status_code}): {res.text}")
-
-    new_refresh = data.get("refresh_token")
-    if new_refresh and new_refresh != TIKTOK_REFRESH_TOKEN:
-        print("TikTok issued a new refresh_token — updating GitHub secret...")
-        update_github_secret("TIKTOK_REFRESH_TOKEN", new_refresh)
-    return data["access_token"]
-
-
-def post_to_tiktok(video_path, caption):
-    """
-    Publishes the local 9:16 video to TikTok via the Content Posting API
-    (Direct Post, FILE_UPLOAD). Used only for RUN_TYPE=video runs.
-    Never raises — returns True/False so a TikTok problem can never fail
-    the run (the blog post and other platforms are already done).
-    """
-    if not (TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET and TIKTOK_REFRESH_TOKEN):
-        print("TIKTOK_* secrets not set — skipping TikTok post.")
-        return False
-    if not video_path or not os.path.exists(video_path):
-        print("No local video file available — skipping TikTok post.")
-        return False
-    try:
-        access_token = get_tiktok_access_token()
-        auth_headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json; charset=UTF-8",
-        }
-
-        # 1) Ask TikTok which privacy levels this account may post with.
-        creator_res = robust_request(
-            "POST", "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
-            headers=auth_headers, timeout=30,
-        )
-        if not creator_res.ok:
-            print(f"TikTok creator_info failed ({creator_res.status_code}): {creator_res.text}")
-            return False
-        options = creator_res.json().get("data", {}).get("privacy_level_options", [])
-        if "PUBLIC_TO_EVERYONE" in options:
-            privacy = "PUBLIC_TO_EVERYONE"
-        elif options:
-            privacy = options[0]
-            print(f"WARNING: PUBLIC_TO_EVERYONE not allowed for this account — "
-                  f"posting as {privacy}. (Is @decorvibeofficial set to Public?)")
-        else:
-            print("TikTok returned no privacy options — cannot post.")
-            return False
-
-        # 2) Init the upload (single chunk — our videos are a few MB).
-        with open(video_path, "rb") as f:
-            video_bytes = f.read()
-        size = len(video_bytes)
-
-        init_res = robust_request(
-            "POST", "https://open.tiktokapis.com/v2/post/publish/video/init/",
-            headers=auth_headers,
-            json={
-                "post_info": {
-                    "title": caption[:2200],
-                    "privacy_level": privacy,
-                    "disable_duet": False,
-                    "disable_comment": False,
-                    "disable_stitch": False,
-                },
-                "source_info": {
-                    "source": "FILE_UPLOAD",
-                    "video_size": size,
-                    "chunk_size": size,
-                    "total_chunk_count": 1,
-                },
-            },
-            timeout=60,
-        )
-        init_json = init_res.json() if init_res.content else {}
-        if not init_res.ok or init_json.get("error", {}).get("code") not in (None, "ok"):
-            print(f"TikTok init failed ({init_res.status_code}): {init_res.text}")
-            return False
-        publish_id = init_json["data"]["publish_id"]
-        upload_url = init_json["data"]["upload_url"]
-
-        # 3) Upload the bytes.
-        up_res = requests.put(
-            upload_url,
-            headers={
-                "Content-Type": "video/mp4",
-                "Content-Length": str(size),
-                "Content-Range": f"bytes 0-{size - 1}/{size}",
-            },
-            data=video_bytes,
-            timeout=180,
-        )
-        if up_res.status_code not in (200, 201, 206):
-            print(f"TikTok upload failed ({up_res.status_code}): {up_res.text}")
-            return False
-
-        # 4) Poll until TikTok finishes processing/publishing.
-        for attempt in range(20):
-            time.sleep(6)
-            st_res = robust_request(
-                "POST", "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
-                headers=auth_headers, json={"publish_id": publish_id}, timeout=30,
-            )
-            st = st_res.json().get("data", {}) if st_res.ok else {}
-            status = st.get("status")
-            print(f"TikTok publish status (attempt {attempt + 1}/20): {status}")
-            if status == "PUBLISH_COMPLETE":
-                print("Posted to TikTok:", publish_id)
-                return True
-            if status == "FAILED":
-                print(f"TikTok publish failed: {st.get('fail_reason')}")
-                return False
-        print("TikTok publish still processing after timeout — treating as not confirmed.")
-        return False
-    except Exception as e:
-        print(f"TikTok post failed (blog post is still published fine): {e}")
-        return False
-
-
-def submit_url_for_indexing(url):
-    """
-    Tell Google to (re)crawl this URL now, via the Indexing API, using the
-    service-account key stored in GOOGLE_INDEXING_KEY. Never raises — if this
-    fails or isn't configured, the post is still published and still gets
-    indexed eventually via the normal sitemap crawl, just slower.
-    """
-    if not GOOGLE_INDEXING_KEY:
-        print("GOOGLE_INDEXING_KEY not set — skipping instant indexing "
-              "(post will still be found via the sitemap eventually).")
-        return
-
-    try:
-        key_info = json.loads(GOOGLE_INDEXING_KEY)
-        credentials = service_account.Credentials.from_service_account_info(
-            key_info, scopes=["https://www.googleapis.com/auth/indexing"]
-        )
-        credentials.refresh(GoogleAuthRequest())
-
-        res = robust_request(
-            "POST", "https://indexing.googleapis.com/v3/urlNotifications:publish",
-            headers={
-                "Authorization": f"Bearer {credentials.token}",
-                "Content-Type": "application/json",
-            },
-            json={"url": url, "type": "URL_UPDATED"},
-            timeout=30,
-        )
-        if res.ok:
-            print("Submitted to Google Indexing API:", url)
-        else:
-            print(f"Indexing API call failed ({res.status_code}): {res.text}")
-    except Exception as e:
-        print(f"Indexing API submission failed (post still published fine): {e}")
 
 
 def _bing_submit_url(url):
@@ -2806,95 +2240,6 @@ def boost_indexing(post_url, bing_ok, history=None):
         print(f"Could not save {BING_BACKLOG_FILE}: {e}")
 
 
-def check_meta_token_health():
-    """
-    Quick pre-flight check for the Facebook/Instagram Page Access Token,
-    run before attempting to post. Catches an expired/invalidated token
-    early with a clear, actionable message — instead of only finding out
-    via a buried OAuthException deep in the Facebook/Instagram post calls.
-    """
-    if not FACEBOOK_PAGE_ACCESS_TOKEN:
-        print("[token health] FACEBOOK_PAGE_ACCESS_TOKEN not set — Facebook/Instagram will be skipped.")
-        return False
-    try:
-        res = requests.get(
-            "https://graph.facebook.com/me",
-            params={"fields": "id,name", "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
-            timeout=15,
-        )
-        if res.ok:
-            print(f"[token health] Facebook/Instagram Page token OK ({res.json().get('name')}).")
-            return True
-        print(f"[token health] Facebook/Instagram Page token looks INVALID: {res.text}")
-        print("[token health] Fix: Graph API Explorer -> generate a new User Token with the usual "
-              "7 permissions -> Extend Access Token in the Access Token Debugger -> "
-              "run me/accounts?fields=name,access_token,instagram_business_account with that extended "
-              "token -> copy the returned access_token into BOTH FACEBOOK_PAGE_ACCESS_TOKEN and "
-              "INSTAGRAM_ACCESS_TOKEN secrets.")
-        return False
-    except Exception as e:
-        print(f"[token health] Could not verify Facebook/Instagram token: {e}")
-        return False
-
-
-def post_to_facebook_page(message, image_url, link):
-    """
-    Posts a native photo to the Facebook Page (reusing the same 4:5 image
-    made for Instagram — also Facebook's own recommended feed ratio as of
-    2026), then adds the blog link as a follow-up comment. `message`
-    (built by the caller) uses a plain CTA phrase rather than the raw URL,
-    since a literal link in the caption text costs organic reach even
-    without using the API's "link" field — the actual clickable URL lives
-    only in the comment, which is guaranteed visible since it's the post's
-    first (usually only) comment, even though programmatically PINNING a
-    comment isn't reliably supported by the Graph API.
-    Never raises — if this fails or isn't configured, the post is still
-    published everywhere else fine. Returns True/False for the dashboard.
-    """
-    if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
-        print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook post.")
-        return False
-
-    try:
-        res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/photos",
-            data={
-                "url": image_url,
-                "caption": message,
-                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-            },
-            timeout=30,
-        )
-        if not res.ok:
-            print(f"Facebook post failed ({res.status_code}): {res.text}")
-            return False
-
-        result = res.json()
-        post_id = result.get("post_id") or result.get("id")
-        print("Posted to Facebook:", post_id)
-
-        # Also add the link as a comment — wrapped separately so a comment
-        # failure doesn't undo the fact that the photo post itself (with
-        # the link already in its caption) already succeeded.
-        try:
-            comment_res = robust_request(
-                "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
-                data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
-                timeout=30,
-            )
-            if comment_res.ok:
-                print("Added link comment:", comment_res.json().get("id"))
-            else:
-                print(f"Facebook link-comment failed ({comment_res.status_code}): {comment_res.text}")
-        except Exception as e:
-            print(f"Facebook link-comment failed (post itself is still published fine): {e}")
-
-        return True
-    except Exception as e:
-        print(f"Facebook post failed (blog post is still published fine): {e}")
-        return False
-
-
 def post_to_tumblr(title, intro, total_cost, time_estimate, difficulty,
                     image_url, link, hashtags):
     """
@@ -2944,276 +2289,6 @@ def post_to_tumblr(title, intro, total_cost, time_estimate, difficulty,
     except Exception as e:
         print(f"Tumblr post failed (blog post is still published fine): {e}")
         return False
-def post_facebook_video(description, video_url, link):
-    """
-    Posts a native video to the Facebook Page (used only for RUN_TYPE=video
-    runs) — this is a plain video post, NOT the clickable link-card that
-    post_to_facebook_page() makes, so it's posted as an ADDITIONAL post
-    alongside the usual link post rather than replacing it, to avoid losing
-    the click-through traffic the link card drives. Also adds the blog link
-    as a comment (same as the image-mode post), since a native video post's
-    description text isn't clickable either.
-    Never raises — returns True/False for the dashboard.
-    """
-    if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
-        print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook video post.")
-        return False
-    try:
-        res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/videos",
-            data={
-                "file_url": video_url,
-                "description": description,
-                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
-            },
-            timeout=120,
-        )
-        if not res.ok:
-            print(f"Facebook video post failed ({res.status_code}): {res.text}")
-            return False
-
-        post_id = res.json().get("id")
-        print("Posted Facebook video:", post_id)
-
-        # Also add the link as a comment — wrapped separately so a comment
-        # failure doesn't undo the fact that the video post itself already
-        # succeeded. Native video posts process ASYNCHRONOUSLY on
-        # Facebook's side (the id above comes back before the video is
-        # fully attached to a commentable post), so the very first attempt
-        # can land too early and get rejected even though the post is
-        # completely fine — retrying with a short wait fixes that.
-        #
-        # IMPORTANT: this retry must be idempotent. robust_request() already
-        # retries on its own on a network timeout/5xx — and posting a
-        # comment isn't idempotent (each successful POST creates a NEW
-        # comment), so if a POST actually succeeded on Facebook's side but
-        # the response back to us was lost (timeout), a naive retry posts
-        # a SECOND copy. That's exactly what was causing the double-comment
-        # (and, on the runs where every attempt genuinely failed,
-        # missing-comment) inconsistency. So before each retry, check
-        # whether our comment is already there first, instead of just
-        # blindly posting again.
-        comment_posted = False
-        for attempt in range(4):
-            if attempt > 0:
-                wait_s = 10 * attempt  # 10s, 20s, 30s
-                print(f"Checking/retrying link comment in {wait_s}s (attempt {attempt + 1}/4)...")
-                time.sleep(wait_s)
-                try:
-                    existing = robust_request(
-                        "GET", f"https://graph.facebook.com/v26.0/{post_id}/comments",
-                        params={"access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
-                        timeout=30,
-                    )
-                    if existing.ok and any(
-                        c.get("message") == link for c in existing.json().get("data", [])
-                    ):
-                        print("Link comment already present from an earlier attempt — not re-posting.")
-                        comment_posted = True
-                        break
-                except Exception as e:
-                    print(f"Couldn't check for an existing comment ({e}) — trying to post anyway.")
-            try:
-                comment_res = robust_request(
-                    "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
-                    data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
-                    timeout=30,
-                )
-                if comment_res.ok:
-                    print("Added link comment:", comment_res.json().get("id"))
-                    comment_posted = True
-                    break
-                else:
-                    print(f"Facebook video link-comment attempt {attempt + 1} failed "
-                          f"({comment_res.status_code}): {comment_res.text}")
-            except Exception as e:
-                print(f"Facebook video link-comment attempt {attempt + 1} failed: {e}")
-        if not comment_posted:
-            print("Giving up on the Facebook video link comment (video post still published fine).")
-
-        return True
-    except Exception as e:
-        print(f"Facebook video post failed (blog post is still published fine): {e}")
-        return False
-
-
-def post_to_instagram(caption, image_url):
-    """
-    Creates an Instagram media container from a public image URL, then
-    publishes it. Uses the Facebook Graph API with a Page Access Token
-    (non-expiring). Never raises — if this fails or isn't configured, the
-    post is still published everywhere else fine. Returns True/False so the
-    caller can record status for the dashboard.
-    """
-    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
-        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram post.")
-        return False
-
-    try:
-        create_res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
-            data={
-                "image_url": image_url,
-                "caption": caption,
-                "access_token": INSTAGRAM_ACCESS_TOKEN,
-            },
-            timeout=60,
-        )
-        if not create_res.ok:
-            print(f"Instagram media creation failed ({create_res.status_code}): {create_res.text}")
-            return False
-        creation_id = create_res.json()["id"]
-
-        # Give Instagram a moment to finish processing the image before publishing.
-        time.sleep(10)
-
-        publish_res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
-            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
-            timeout=60,
-        )
-        if publish_res.ok:
-            print("Posted to Instagram:", publish_res.json().get("id"))
-            return True
-        else:
-            print(f"Instagram publish failed ({publish_res.status_code}): {publish_res.text}")
-            return False
-    except Exception as e:
-        print(f"Instagram post failed (blog post is still published fine): {e}")
-        return False
-
-
-def _create_ig_carousel_child(image_url):
-    """Creates one carousel slide's media container (no caption on children)."""
-    res = robust_request(
-        "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
-        data={
-            "image_url": image_url,
-            "is_carousel_item": "true",
-            "access_token": INSTAGRAM_ACCESS_TOKEN,
-        },
-        timeout=60,
-    )
-    if not res.ok:
-        raise RuntimeError(f"Carousel child creation failed ({res.status_code}): {res.text}")
-    return res.json()["id"]
-
-
-def post_to_instagram_carousel(caption, image_urls):
-    """
-    Posts a multi-slide Instagram carousel (2-10 public image URLs). Falls
-    back to a single-image post via post_to_instagram() using the first
-    image if fewer than 2 URLs are given, or if anything in the carousel
-    flow fails — so a carousel hiccup never costs the Instagram post
-    entirely, same philosophy as the rest of this script's social posting.
-    """
-    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
-        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram post.")
-        return False
-
-    if len(image_urls) < 2:
-        return post_to_instagram(caption, image_urls[0]) if image_urls else False
-
-    try:
-        child_ids = []
-        for url in image_urls:
-            child_ids.append(_create_ig_carousel_child(url))
-            time.sleep(2)
-
-        # Let all children finish processing before assembling the carousel.
-        time.sleep(8)
-
-        parent_res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
-            data={
-                "media_type": "CAROUSEL",
-                "children": ",".join(child_ids),
-                "caption": caption,
-                "access_token": INSTAGRAM_ACCESS_TOKEN,
-            },
-            timeout=60,
-        )
-        if not parent_res.ok:
-            raise RuntimeError(f"Carousel container failed ({parent_res.status_code}): {parent_res.text}")
-        creation_id = parent_res.json()["id"]
-
-        time.sleep(10)
-
-        publish_res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
-            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
-            timeout=60,
-        )
-        if not publish_res.ok:
-            raise RuntimeError(f"Carousel publish failed ({publish_res.status_code}): {publish_res.text}")
-
-        print("Posted Instagram carousel:", publish_res.json().get("id"))
-        return True
-    except Exception as e:
-        print(f"Instagram carousel failed ({e}), falling back to single-image post...")
-        return post_to_instagram(caption, image_urls[0])
-
-
-def post_instagram_reel(caption, video_url):
-    """
-    Posts a Reel (used only for RUN_TYPE=video runs), replacing the usual
-    carousel for that run. Reels take longer to process than images, so
-    this polls the container's status_code until FINISHED (capped attempts)
-    before publishing, instead of a fixed sleep like the image/carousel
-    paths use. Never raises — returns True/False for the dashboard.
-    """
-    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
-        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram Reel.")
-        return False
-    try:
-        create_res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
-            data={
-                "media_type": "REELS",
-                "video_url": video_url,
-                "caption": caption,
-                "access_token": INSTAGRAM_ACCESS_TOKEN,
-            },
-            timeout=60,
-        )
-        if not create_res.ok:
-            print(f"Instagram Reel container failed ({create_res.status_code}): {create_res.text}")
-            return False
-        creation_id = create_res.json()["id"]
-
-        # Poll for processing to finish (video takes longer than an image).
-        for attempt in range(15):
-            time.sleep(10)
-            status_res = robust_request(
-                "GET", f"https://graph.facebook.com/v26.0/{creation_id}",
-                params={"fields": "status_code", "access_token": INSTAGRAM_ACCESS_TOKEN},
-                timeout=30,
-            )
-            status_code = status_res.json().get("status_code") if status_res.ok else None
-            print(f"Reel processing status (attempt {attempt + 1}/15): {status_code}")
-            if status_code == "FINISHED":
-                break
-            if status_code == "ERROR":
-                print("Instagram Reel processing failed (ERROR status).")
-                return False
-        else:
-            print("Instagram Reel never finished processing in time — skipping publish.")
-            return False
-
-        publish_res = robust_request(
-            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
-            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
-            timeout=60,
-        )
-        if publish_res.ok:
-            print("Posted Instagram Reel:", publish_res.json().get("id"))
-            return True
-        else:
-            print(f"Instagram Reel publish failed ({publish_res.status_code}): {publish_res.text}")
-            return False
-    except Exception as e:
-        print(f"Instagram Reel failed (blog post is still published fine): {e}")
-        return False
 
 
 STATUS_FILE = "status.json"
@@ -3242,20 +2317,21 @@ def send_phone_notification(subject, body):
         print(f"Could not send phone notification (non-fatal): {e}")
 
 
-def save_status(blogger_ok, blogger_url, facebook_ok, pinterest_ok, instagram_ok, tumblr_ok=False, tiktok_ok=None):
+def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False):
     """
     Writes a small status.json the control panel reads to show a simple
-    green-tick/red-cross per platform for the most recent run, with when
-    it happened — instead of parsing raw workflow logs.
+    green-tick/red-cross per platform for the most recent run. Facebook,
+    Instagram and TikTok are no longer posted to; their keys are kept as
+    null so anything reading this file doesn't break.
     """
     now = datetime.now(timezone.utc).isoformat()
     status = {
         "blogger": {"success": blogger_ok, "url": blogger_url, "timestamp": now},
-        "facebook": {"success": facebook_ok, "timestamp": now},
         "pinterest": {"success": pinterest_ok, "timestamp": now},
-        "instagram": {"success": instagram_ok, "timestamp": now},
         "tumblr": {"success": tumblr_ok, "timestamp": now},
-        "tiktok": {"success": tiktok_ok, "timestamp": now},  # None = not attempted (image run)
+        "facebook": {"success": None, "timestamp": now},
+        "instagram": {"success": None, "timestamp": now},
+        "tiktok": {"success": None, "timestamp": now},
     }
     with open(STATUS_FILE, "w") as f:
         json.dump(status, f, indent=2)
@@ -3370,69 +2446,6 @@ def main():
         hero_url = upload_to_r2(hero_filepath)
         print(f"Hero image compressed to {len(hero_compressed) / 1024:.1f} KB")
 
-        # --- Instagram-optimized image (4:5, Instagram's recommended feed
-        # ratio) — cropped from the same source photo, with its own text
-        # overlay sized/positioned for this canvas rather than just cropping
-        # the already-finished 2:3 hero (which would risk cutting the banner).
-        print("Preparing Instagram-optimized image (4:5)...")
-        ig_compressed = finalize_pin_image(raw_hero, pin_hook, target_ratio=4 / 5)
-        ig_filename = f"decor-{ts}-instagram.webp"
-        ig_filepath = os.path.join("images", ig_filename)
-        with open(ig_filepath, "wb") as f:
-            f.write(ig_compressed)
-        ig_image_url = upload_to_r2(ig_filepath)
-        print(f"Instagram image compressed to {len(ig_compressed) / 1024:.1f} KB")
-
-        # --- Quick-take card (used two ways): a carousel slide in
-        # image-mode, or one of the slideshow slides in video-mode. Built
-        # once either way — no extra Pexels call, just drawn text.
-        ig_quicktake_compressed = build_text_card([
-            ("Quick Take", True),
-            (f"Cost: {total_cost_raw}", False),
-            (f"Time: {time_estimate_raw}", False),
-            (f"Difficulty: {difficulty_raw}", False),
-        ])
-        ig_slide2_filename = f"decor-{ts}-ig-quicktake.webp"
-        ig_slide2_filepath = os.path.join("images", ig_slide2_filename)
-        with open(ig_slide2_filepath, "wb") as f:
-            f.write(ig_quicktake_compressed)
-        ig_slide2_url = upload_to_r2(ig_slide2_filepath)
-
-        # --- CTA card (used two ways): last slide of the image-mode
-        # carousel, OR the closing slide of the video-mode slideshow.
-        # Built once either way — no extra Pexels call, just drawn text.
-        ig_cta_compressed = build_text_card([
-            ("Want The Full Guide", True),
-            ("Tap the link in our bio", False),
-            ("for the full step-by-step", False),
-        ])
-        ig_slide4_filename = f"decor-{ts}-ig-cta.webp"
-        ig_slide4_filepath = os.path.join("images", ig_slide4_filename)
-        with open(ig_slide4_filepath, "wb") as f:
-            f.write(ig_cta_compressed)
-        ig_slide4_url = upload_to_r2(ig_slide4_filepath)
-
-        ig_slide3_filepath = None
-        if RUN_TYPE != "video":
-            # --- Image-mode (default/morning run): the 3rd carousel slide
-            # (a second hook photo, reusing raw_hero — no extra Pexels call).
-            ig_slide3_compressed = finalize_pin_image(
-                raw_hero, "See The Full Tutorial", target_ratio=4 / 5
-            )
-            ig_slide3_filename = f"decor-{ts}-ig-tutorial.webp"
-            ig_slide3_filepath = os.path.join("images", ig_slide3_filename)
-            with open(ig_slide3_filepath, "wb") as f:
-                f.write(ig_slide3_compressed)
-            ig_slide3_url = upload_to_r2(ig_slide3_filepath)
-            print("Instagram carousel slides ready.")
-
-        # Facebook now reuses the same hero image used on Pinterest/Instagram
-        # (see below) — no separate Facebook-specific image is generated
-        # anymore, since Facebook posting switched from a link-share (which
-        # needed its own landscape preview image) to a native photo post
-        # with the blog link moved to a comment.
-
-
 
         # --- Section images (horizontal, no text overlay, one per placeholder) ---
         section_images = draft.get("section_images", [])
@@ -3458,14 +2471,12 @@ def main():
                 section_urls[token] = (section_url, query)
             except Exception as e:
                 # One section photo failing (rare network/API hiccup)
-                # shouldn't crash a run where the hero image, Facebook
-                # image, and the rest of the article are already done —
+                # shouldn't crash a run where the hero image and the
+                # rest of the article are already done —
                 # skip just this section's image; its [[IMG_n]] placeholder
                 # gets cleaned up below like any other unmatched token.
                 print(f"Section photo for {token} failed, skipping it: {e}")
 
-        reel_video_filepath = None
-        reel_video_url = None
         pin_cover_filepath = None
         if RUN_TYPE == "video":
             # --- Video-mode: build a narrated vertical video using the
@@ -3545,13 +2556,9 @@ def main():
                 {"bytes": b, "caption": c, "duration": 1}  # duration set below
                 for b, c in zip(real_image_bytes, content_captions)
             ]
-            # A blank branded background (no baked-in text) — NOT
-            # ig_cta_compressed, which already has "Want the full guide /
-            # link in our bio" text drawn into the image for the Instagram
-            # carousel. Reusing that here would double up with the CTA
-            # caption overlay below, showing two overlapping messages.
-            video_cta_bg = build_text_card([], size=(1080, 1920))
-            image_specs.append({"bytes": video_cta_bg, "caption": cta_line, "duration": 1, "is_cta": True})
+            # The template has its own call-to-action bar, so the closing slide
+            # simply shows the hero photo again.
+            image_specs.append({"bytes": real_image_bytes[0], "caption": cta_line, "duration": 1, "is_cta": True})
 
             # Word-weighted duration so a longer caption gets more screen
             # time than a short one, proportioned to the voiceover's total
@@ -3572,57 +2579,14 @@ def main():
                     spec["duration"] = max(1.5, capped)
             image_specs[-1]["duration"] += overflow  # CTA card absorbs the difference
 
-            print(f"Building video from {len(image_specs)} real-image slide(s)...")
-            if USE_TEMPLATE_VIDEO:
-                # The template has its own call-to-action bar, so the closing
-                # slide reuses the hero photo instead of a blank text card.
-                image_specs[-1]["bytes"] = real_image_bytes[0]
-                tpl_top, tpl_bottom, tpl_highlight = template_bar_texts(draft)
-                tpl_music = pick_background_music()
-            # The 9:16 video is only used by Facebook/Instagram/TikTok; with those
-            # switched off, building it would just waste a minute.
-            need_reel_video = (not USE_TEMPLATE_VIDEO) or ENABLE_META or ENABLE_TIKTOK
-            if need_reel_video:
-                if USE_TEMPLATE_VIDEO:
-                    reel_video_bytes = video_template.build_template_video(
-                        image_specs, audio_path, work_dir, width=1080, height=1920,
-                        top_text=tpl_top, bottom_text=tpl_bottom, bottom_highlight=tpl_highlight,
-                        music_path=tpl_music,
-                    )
-                else:
-                    reel_video_bytes = build_reel_video(
-                        image_specs, audio_path, work_dir=work_dir
-                    )
-                reel_video_filename = f"decor-{ts}-reel.mp4"
-                reel_video_filepath = os.path.join("images", reel_video_filename)
-                with open(reel_video_filepath, "wb") as f:
-                    f.write(reel_video_bytes)
-                reel_video_url = upload_to_r2(reel_video_filepath)
-                print(f"Video ready ({len(reel_video_bytes) / 1024:.0f} KB).")
-            else:
-                print("Skipping the 9:16 video (Facebook/Instagram/TikTok are switched off).")
-
-            # A SECOND video, just for the Pinterest pin — same images,
-            # captions, and voiceover, re-rendered at 2:3 instead of 9:16.
-            # Pinterest fully supports 9:16 video pins, but 2:3 is its own
-            # officially best-performing ratio (and reusing the 9:16 file
-            # for both was the underlying cause of the black letterboxing
-            # bars Pinterest was adding to reconcile the mismatch with its
-            # expected pin shape). The Instagram/Facebook video above is
-            # untouched by this — it stays exactly 9:16 as required.
-            print("Building a 2:3 version for the Pinterest pin...")
+            print(f"Building the Pinterest video (2:3) from {len(image_specs)} real-image slide(s)...")
+            tpl_top, tpl_bottom, tpl_highlight = template_bar_texts(draft)
             pinterest_work_dir = os.path.join("images", f"reel-work-pin-{ts}")
-            if USE_TEMPLATE_VIDEO:
-                pinterest_video_bytes = video_template.build_template_video(
-                    image_specs, audio_path, pinterest_work_dir, width=1080, height=1620,
-                    top_text=tpl_top, bottom_text=tpl_bottom, bottom_highlight=tpl_highlight,
-                    music_path=tpl_music,
-                )
-            else:
-                pinterest_video_bytes = build_reel_video(
-                    image_specs, audio_path, work_dir=pinterest_work_dir,
-                    width=1080, height=1620,
-                )
+            pinterest_video_bytes = video_template.build_template_video(
+                image_specs, audio_path, pinterest_work_dir, width=1080, height=1620,
+                top_text=tpl_top, bottom_text=tpl_bottom, bottom_highlight=tpl_highlight,
+                music_path=pick_background_music(),
+            )
             print(f"Pinterest video ready ({len(pinterest_video_bytes) / 1024:.0f} KB).")
 
             # Pinterest's video-pin cover_image_url rejects WebP (every
@@ -3792,11 +2756,7 @@ def main():
         )
 
         # The hero image is simply the first <img> in the post — Blogger
-        # uses whatever image appears first as the page's og:image, which
-        # used to require a separate hidden landscape image specifically
-        # for Facebook's link-preview card. That's no longer needed since
-        # Facebook posting switched to a native photo post (see below),
-        # which doesn't generate a link-preview card at all.
+        # uses whatever image appears first as the page's og:image.
         full_html = (
             f'<img src="{hero_url}" alt="{draft["title"]}" style="max-width:100%;height:auto;" />\n'
             f'{quick_take_html}\n{body_html}\n{related_posts_html}\n{faq_html}\n'
@@ -3818,7 +2778,7 @@ def main():
         # instead of silently keeping yesterday's green tick.
         print(f"Run failed before publishing: {e}")
         try:
-            save_status(blogger_ok=False, blogger_url=None, facebook_ok=False, pinterest_ok=False, instagram_ok=False)
+            save_status(blogger_ok=False, blogger_url=None, pinterest_ok=False)
             git_commit_and_push([STATUS_FILE], "Auto post: run failed before publishing")
         except Exception as status_err:
             print(f"Could not save failure status: {status_err}")
@@ -3828,69 +2788,12 @@ def main():
         )
         raise
 
-    if ENABLE_GOOGLE_INDEXING:
-        print("Notifying Google Indexing API...")
-        submit_url_for_indexing(post_url)
-    else:
-        print("Google Indexing API is switched off (ENABLE_GOOGLE_INDEXING is not 'true') — skipping; "
-              "Google finds posts via the sitemap and the hub page.")
-
     print("Notifying Bing Submission API...")
     bing_ok = submit_to_bing(post_url)
 
-    # Pinterest keeps a modest hashtag count (its own norms lean lighter);
-    # Instagram/Facebook use a richer set from the same tag pool, since more
-    # hashtags there genuinely helps discovery rather than looking spammy.
+    # Pinterest keeps a modest hashtag count; Tumblr uses a richer set from the same pool.
     pin_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []), max_tags=5)
-    social_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []), max_tags=15)
-
-    if not ENABLE_META:
-        print("Facebook + Instagram are switched off (ENABLE_META is not 'true') — skipping.")
-        facebook_ok = None
-        instagram_ok = None
-    elif not check_meta_token_health():
-        print("Skipping Facebook + Instagram posting this run — see the health check message above.")
-        facebook_ok = False
-        instagram_ok = False
-    elif RUN_TYPE == "video":
-        # Video-mode (evening run): a native Facebook video post (not a
-        # clickable link-card — accepted trade-off) and an Instagram Reel,
-        # instead of the morning run's link-post + carousel.
-        print("Posting Facebook video...")
-        category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
-        fb_message = (
-            f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
-            f"👉 Visit our website for the full guide!\n\n{social_hashtags}"
-        )
-        facebook_ok = post_facebook_video(fb_message, reel_video_url, post_url)
-
-        print("Posting Instagram Reel...")
-        ig_caption = f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
-        instagram_ok = post_instagram_reel(ig_caption, reel_video_url)
-    else:
-        # Image-mode (morning run, default): native photo post reusing the
-        # same 4:5 image made for Instagram (Facebook's own recommended
-        # feed ratio too, as of 2026). The caption uses a plain CTA phrase
-        # instead of the raw URL — a literal link in the caption text still
-        # costs reach even without the "link" API field — while the actual
-        # clickable link goes in a follow-up comment (see
-        # post_to_facebook_page) for guaranteed one-tap access. Captions
-        # lead with the same punchy "pin_hook" line used on the image
-        # itself — Facebook/Instagram only show the first 1-2 lines before
-        # "See more".
-        print("Posting to Facebook Page...")
-        category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
-        fb_message = (
-            f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
-            f"👉 Visit our website for the full guide!\n\n{social_hashtags}"
-        )
-        facebook_ok = post_to_facebook_page(fb_message, ig_image_url, post_url)
-
-        print("Posting to Instagram (carousel)...")
-        ig_caption = f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\nFull post: link in bio 🔗\n\n{social_hashtags}"
-        instagram_ok = post_to_instagram_carousel(
-            ig_caption, [ig_image_url, ig_slide2_url, ig_slide3_url, ig_slide4_url]
-        )
+    tumblr_hashtags = build_pin_hashtags(draft.get("hashtag_labels", []), max_tags=15)
 
     # History (with URL, for future internal linking) is saved and committed
     # AFTER publishing, now that we actually know the post's URL.
@@ -3952,26 +2855,13 @@ description=extract_pin_description(
         difficulty=draft["difficulty"],
         image_url=hero_url,
         link=post_url,
-        hashtags=social_hashtags,
+        hashtags=tumblr_hashtags,
     )
-
-    # TikTok: video runs only (None = not attempted, shown as "skipped").
-    tiktok_ok = None
-    if not ENABLE_TIKTOK:
-        print("TikTok is switched off (ENABLE_TIKTOK is not 'true') — skipping.")
-    elif RUN_TYPE == "video":
-        print("Posting to TikTok...")
-        tiktok_caption = f"{pin_hook}\n\n{draft['title']}\n\nFull guide on our website 🔗\n\n{pin_hashtags}"
-        tiktok_ok = post_to_tiktok(reel_video_filepath, tiktok_caption)
 
     print("Updating the all-posts hub page + Bing backlog...")
     boost_indexing(post_url, bing_ok, history)
 
-    save_status(
-        blogger_ok=True, blogger_url=post_url,
-        facebook_ok=facebook_ok, pinterest_ok=pinterest_ok, instagram_ok=instagram_ok,
-        tumblr_ok=tumblr_ok, tiktok_ok=tiktok_ok,
-    )
+    save_status(blogger_ok=True, blogger_url=post_url, pinterest_ok=pinterest_ok, tumblr_ok=tumblr_ok)
     print("Committing history + status...")
     commit_paths = [HISTORY_FILE, STATUS_FILE]
     if os.path.exists(BING_BACKLOG_FILE):
@@ -3979,32 +2869,35 @@ description=extract_pin_description(
     git_commit_and_push(commit_paths, f"Auto post history: {draft['title']}")
 
     def tick(ok):
-        if ok is None:
-            return "➖ off"
         return "✅" if ok else "❌"
 
     send_phone_notification(
         f"{tick(True)} DecorVibe posted: {draft['title'][:60]}",
         f"{draft['title']}\n{post_url}\n\n"
         f"Blogger: {tick(True)}\n"
-        f"Facebook: {tick(facebook_ok)}\n"
-        f"Instagram: {tick(instagram_ok)}\n"
         f"Pinterest: {tick(pinterest_ok)}\n"
-        f"Tumblr: {tick(tumblr_ok)}\n"
-        f"TikTok: {tick(tiktok_ok)}",
+        f"Tumblr: {tick(tumblr_ok)}",
     )
 
-    # Clean up everything in R2 that was only ever needed to get through
-    # THIS run's posting (Facebook/Instagram/Pinterest/Tumblr have all
-    # fetched their own copies by now) — keeps R2 storage from growing
-    # forever, especially now that video-mode uploads a couple of MB per
-    # run instead of a few KB. hero_url is deliberately NOT included:
-    # Blogger's post keeps embedding that exact URL permanently.
+    # Clean up what R2 only held for this run (Pinterest fetched its own copy of the
+    # video cover). hero_url stays: Blogger embeds that exact URL permanently.
     print("Cleaning up temporary R2 files...")
-    for path in [ig_filepath, ig_slide2_filepath, ig_slide3_filepath,
-                 ig_slide4_filepath, reel_video_filepath, pin_cover_filepath]:
-        delete_from_r2(path)
+    delete_from_r2(pin_cover_filepath)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        # Only when nothing was published (so a retry can't create a duplicate post):
+        # Gemini rate limits recover within minutes, so wait and try once more.
+        if "Nothing was published" not in str(e):
+            raise
+        wait_minutes = int(os.environ.get("PREPUBLISH_RETRY_MINUTES", "15"))
+        if wait_minutes <= 0:
+            raise
+        print(f"No post was published ({e}). Waiting {wait_minutes} minutes, then trying once more...")
+        time.sleep(wait_minutes * 60)
+        _DEAD_MODELS.clear()
+        _vision_state.update(used=0, disabled=False)
+        main()
