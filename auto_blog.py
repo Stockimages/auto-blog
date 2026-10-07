@@ -934,10 +934,20 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                         print(f"[{model}] Gemini request failed ({e}), retrying in {delay}s "
                               f"(attempt {attempt}/{max_attempts})...")
                         time.sleep(delay)
+                    else:
+                        print(f"[{model}] network error ({str(e)[:120]}), switching to fallback model...")
                     continue
 
                 if res.ok:
-                    text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    try:
+                        text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        # a 200 with no usable text (blocked / empty answer): treat like any other failure
+                        last_error = f"empty or blocked answer: {res.text[:150]}"
+                        if is_last_attempt_for_model and is_final_attempt_ever:
+                            raise RuntimeError(f"Gemini gave no usable answer on all models: {last_error}")
+                        print(f"[{model}] gave no usable answer ({last_error[:120]}), switching to fallback model...")
+                        continue
                     text = text.replace("```json", "").replace("```", "").strip()
                     try:
                         parsed = json.loads(text)
@@ -2670,15 +2680,15 @@ def main():
             # photo's own shape, whatever Pexels happened to return that
             # as, and not 9:16 either — that mismatch was the cause of the
             # black letterboxing bars in the first place).
-            pin_cover_img = Image.open(BytesIO(raw_hero)).convert("RGB")
-            pin_cover_img = crop_to_ratio(pin_cover_img, target_ratio=2 / 3)
-            pin_cover_img = pin_cover_img.resize((1080, 1620), Image.LANCZOS)
-            pin_cover_out = BytesIO()
-            pin_cover_img.save(pin_cover_out, format="JPEG", quality=85)
+            # The thumbnail is the video's own look as a still (title bar with a
+            # yellow word, photo, call to action), so every video pin's cover
+            # matches its video instead of showing a plain photo.
+            pin_cover_bytes = video_template.render_cover(
+                raw_hero, tpl_top, tpl_bottom, tpl_highlight, width=1080, height=1620)
             pin_cover_filename = f"decor-{ts}-pin-cover.jpg"
             pin_cover_filepath = os.path.join("images", pin_cover_filename)
             with open(pin_cover_filepath, "wb") as f:
-                f.write(pin_cover_out.getvalue())
+                f.write(pin_cover_bytes)
             pin_cover_url = upload_to_r2(pin_cover_filepath)
 
         # Images/video are already uploaded to R2 individually above — no
