@@ -1503,28 +1503,82 @@ def plan_photo_queries(draft, n_extra=4):
     return {}
 
 
+def _table_rows(html_text):
+    """First <table> in the post as a list of rows, each a list of plain-text cells."""
+    m = re.search(r"<table.*?</table>", html_text or "", re.DOTALL | re.IGNORECASE)
+    if not m:
+        return []
+    rows = []
+    for tr in re.findall(r"<tr.*?</tr>", m.group(0), re.DOTALL | re.IGNORECASE):
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.DOTALL | re.IGNORECASE)
+        rows.append([re.sub(r"<[^>]+>", " ", c).strip() for c in cells])
+    return rows
+
+
+def _minutes_in(text):
+    """'15 mins', '2 hours', '1-2 hours' -> minute values."""
+    vals = []
+    for m in re.finditer(r"(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*(hours?|hrs?|minutes?|mins?)\b", text, re.IGNORECASE):
+        mult = 60 if m.group(3).lower().startswith("h") else 1
+        vals += [float(g) * mult for g in (m.group(1), m.group(2)) if g]
+    return vals
+
+
+def _fmt_minutes(v):
+    return f"{v / 60:g} hour{'s' if v / 60 != 1 else ''}" if v >= 60 else f"{v:g} min"
+
+
 def fix_listicle_cost(draft):
     """
-    Listicle Quick Take showed "$25-$45" while the table's seven items added
-    up to $126. For listicles ("per idea") and mistakes-and-fixes posts
-    ("per fix") the cost is per item, so total_cost is rebuilt from the
-    table's own prices: "$6-$30 per idea".
+    The Quick Take box must agree with the article's own table:
+      * listicle / mistakes-and-fixes: cost (and, for listicles, time) are PER
+        ITEM, so they are rebuilt from the table: "$10-$35 per idea".
+      * designer look for less: the cost is the sum of the budget column of
+        the comparison table (a post claimed $57 while its table added up to
+        $35); the same wrong total is corrected where the text quotes it.
     """
     try:
-        unit = {"listicle": "per idea", "mistakes and fixes": "per fix"}.get(draft.get("_format"))
-        if not unit:
+        fmt = draft.get("_format")
+        rows = _table_rows(draft.get("html", ""))
+        if not rows:
             return
-        m = re.search(r"<table.*?</table>", draft.get("html", ""), re.DOTALL | re.IGNORECASE)
-        if not m:
-            return
-        amounts = [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", m.group(0))]
-        if len(amounts) < 2:
-            return
-        lo, hi = min(amounts), max(amounts)
+        amount = lambda t: [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", t)]
         fmt_amt = lambda v: f"${v:g}"
-        draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)} {unit}" if lo != hi else f"{fmt_amt(lo)} {unit}")
+
+        unit = {"listicle": "per idea", "mistakes and fixes": "per fix"}.get(fmt)
+        if unit:
+            amounts = [v for row in rows[1:] for cell in row for v in amount(cell)]
+            if len(amounts) >= 2:
+                lo, hi = min(amounts), max(amounts)
+                draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)} {unit}" if lo != hi else f"{fmt_amt(lo)} {unit}")
+            if fmt == "listicle":
+                header = [c.lower() for c in rows[0]]
+                if any("time" in c for c in header):
+                    ti = next(i for i, c in enumerate(header) if "time" in c)
+                    mins = [v for row in rows[1:] if len(row) > ti for v in _minutes_in(row[ti])]
+                    if len(mins) >= 2:
+                        lo, hi = min(mins), max(mins)
+                        if hi < 60:
+                            draft["time_estimate"] = (f"{lo:g}-{hi:g} minutes {unit}" if lo != hi else f"{lo:g} minutes {unit}")
+                        else:
+                            draft["time_estimate"] = (f"{_fmt_minutes(lo)} to {_fmt_minutes(hi)} {unit}" if lo != hi
+                                                      else f"{_fmt_minutes(lo)} {unit}")
+        elif fmt == "designer look for less":
+            budget = []
+            for row in rows[1:]:
+                if len(row) >= 3 and amount(row[1]):
+                    budget.append(max(amount(row[1])))
+            if len(budget) >= 2:
+                total = sum(budget)
+                old = amount(str(draft.get("total_cost", "")))
+                draft["total_cost"] = fmt_amt(total)
+                if old and abs(old[0] - total) > 0.5:
+                    old_s = f"${old[0]:g}"
+                    draft["html"] = re.sub(
+                        r"\b(about|around|roughly|only|just|for|under|at)\s+" + re.escape(old_s) + r"(?![\d.])",
+                        lambda m: f"{m.group(1)} {fmt_amt(total)}", draft["html"])
     except Exception as e:
-        print(f"Listicle cost fix skipped ({e}).")
+        print(f"Cost/time fix skipped ({e}).")
 
 
 def draft_has_hero_photo(draft, history):
@@ -1723,12 +1777,16 @@ def add_pin_text(image_bytes, hook_text):
     draw = ImageDraw.Draw(img, "RGBA")
 
     font_size = max(28, int(w * 0.085))
-    font = _load_bold_font(font_size)
-
     wrapped = textwrap.fill(hook_text.upper(), width=16)
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=8, align="center")
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
+    while True:
+        font = _load_bold_font(font_size)
+        bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=8, align="center")
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        # shrink until the widest line leaves a margin on both sides
+        if (text_w <= w * 0.9 and text_h <= h * 0.3) or font_size <= 24:
+            break
+        font_size -= 3
 
     pad_x, pad_y = 36, 28
     band_top = int(h * 0.05)
