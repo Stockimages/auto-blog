@@ -1,27 +1,27 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/10/5-holiday-decorating-mistakes-that-make.html",
-    "timestamp": "2026-10-07T13:38:40.455172+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-10-08T01:37:05.346886+00:00"
   },
   "pinterest": {
-    "success": true,
-    "timestamp": "2026-10-07T13:38:40.455172+00:00"
+    "success": false,
+    "timestamp": "2026-10-08T01:37:05.346886+00:00"
   },
   "tumblr": {
-    "success": true,
-    "timestamp": "2026-10-07T13:38:40.455172+00:00"
+    "success": false,
+    "timestamp": "2026-10-08T01:37:05.346886+00:00"
   },
   "facebook": {
     "success": null,
-    "timestamp": "2026-10-07T13:38:40.455172+00:00"
+    "timestamp": "2026-10-08T01:37:05.346886+00:00"
   },
   "instagram": {
     "success": null,
-    "timestamp": "2026-10-07T13:38:40.455172+00:00"
+    "timestamp": "2026-10-08T01:37:05.346886+00:00"
   },
   "tiktok": {
     "success": null,
-    "timestamp": "2026-10-07T13:38:40.455172+00:00"
+    "timestamp": "2026-10-08T01:37:05.346886+00:00"
   }
 }
