@@ -338,6 +338,7 @@ _TITLE_FILLER = {
     # words of the post FORMATS themselves ("... in 4 Simple Layers" is a template, not a topic)
     "layer", "layers", "simple", "style", "styled", "styling", "elegant", "perfect", "beautiful",
     "stunning", "gorgeous", "ultimate", "complete", "essential",
+    "designer", "fraction", "price", "cheap", "expensive", "less", "worth",
 }
 
 
@@ -1574,19 +1575,24 @@ def fix_listicle_cost(draft):
                             draft["time_estimate"] = (f"{_fmt_minutes(lo)} to {_fmt_minutes(hi)} {unit}" if lo != hi
                                                       else f"{_fmt_minutes(lo)} {unit}")
         elif fmt == "designer look for less":
-            budget = []
+            lows, highs = [], []
             for row in rows[1:]:
                 if len(row) >= 3 and amount(row[1]):
-                    budget.append(max(amount(row[1])))
-            if len(budget) >= 2:
-                total = sum(budget)
+                    lows.append(min(amount(row[1])))
+                    highs.append(max(amount(row[1])))
+            if len(lows) >= 2:
+                lo, hi = sum(lows), sum(highs)
+                new_total = f"{fmt_amt(lo)}-{fmt_amt(hi)}" if lo != hi else fmt_amt(lo)
+                new_words = f"{fmt_amt(lo)} to {fmt_amt(hi)}" if lo != hi else fmt_amt(lo)
                 old = amount(str(draft.get("total_cost", "")))
-                draft["total_cost"] = fmt_amt(total)
-                if old and abs(old[0] - total) > 0.5:
-                    old_s = f"${old[0]:g}"
+                draft["total_cost"] = new_total
+                if old:
+                    # rewrite the whole phrase ("about $55", "around $55 to $65") so a range is never
+                    # half-replaced into nonsense like "$65 to $55"
                     draft["html"] = re.sub(
-                        r"\b(about|around|roughly|only|just|for|under|at)\s+" + re.escape(old_s) + r"(?![\d.])",
-                        lambda m: f"{m.group(1)} {fmt_amt(total)}", draft["html"])
+                        r"\b(about|around|roughly|only|just|for|under|at)\s+\$" + re.escape(f"{old[0]:g}")
+                        + r"(?:\s*(?:to|-|–)\s*\$\d+(?:\.\d+)?)?(?!\d)(?!\.\d)",
+                        lambda m: f"{m.group(1)} {new_words}", draft["html"])
     except Exception as e:
         print(f"Cost/time fix skipped ({e}).")
 
