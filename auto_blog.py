@@ -451,6 +451,23 @@ def find_quality_problems(draft, min_words=600):
     brand = _BRAND_RE.search(searchable) or _BRAND_RE_CAP.search(searchable)
     if brand:
         problems.append(f"names a brand/store/product: \"{brand.group(0)}\"")
+
+    # Prices in the title must agree with the article's own table (a title said
+    # "$12 Thrifted Plastic Basket" while the table priced the basket at $6).
+    title = draft.get("title", "")
+    rows = _table_rows(draft.get("html", ""))
+    table_amounts = {float(x) for row in rows for cell in row for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", cell)}
+    if table_amounts:
+        for m in re.finditer(r"\$\s?(\d+(?:\.\d+)?)\s+thrift(?:ed)?\b", title, re.IGNORECASE):
+            n = float(m.group(1))
+            if n not in table_amounts:
+                problems.append(f"title says \"${n:g} thrifted...\" but the table never shows ${n:g}")
+    if draft.get("_format") not in ("listicle", "mistakes and fixes"):
+        totals = [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", str(draft.get("total_cost", "")))]
+        for m in re.finditer(r"(?:under|below|less than)\s+\$\s?(\d+(?:\.\d+)?)", title, re.IGNORECASE):
+            n = float(m.group(1))
+            if totals and n < max(totals):
+                problems.append(f"title promises \"under ${n:g}\" but the article's total is ${max(totals):g}")
     return problems
 
 
