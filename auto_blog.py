@@ -2683,8 +2683,18 @@ def main():
             # The thumbnail is the video's own look as a still (title bar with a
             # yellow word, photo, call to action), so every video pin's cover
             # matches its video instead of showing a plain photo.
-            pin_cover_bytes = video_template.render_cover(
-                raw_hero, tpl_top, tpl_bottom, tpl_highlight, width=1080, height=1620)
+            try:
+                pin_cover_bytes = video_template.render_cover(
+                    raw_hero, tpl_top, tpl_bottom, tpl_highlight, width=1080, height=1620)
+            except Exception as e:
+                # e.g. an older video_template.py without render_cover: a plain cover is
+                # far better than losing the whole post.
+                print(f"Template cover failed ({e}) — using the plain hero photo as the cover.")
+                plain = crop_to_ratio(Image.open(BytesIO(raw_hero)).convert("RGB"), target_ratio=2 / 3)
+                plain = plain.resize((1080, 1620), Image.LANCZOS)
+                plain_out = BytesIO()
+                plain.save(plain_out, format="JPEG", quality=85)
+                pin_cover_bytes = plain_out.getvalue()
             pin_cover_filename = f"decor-{ts}-pin-cover.jpg"
             pin_cover_filepath = os.path.join("images", pin_cover_filename)
             with open(pin_cover_filepath, "wb") as f:
