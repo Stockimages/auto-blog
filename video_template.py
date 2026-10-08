@@ -29,6 +29,12 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 FPS = 30
 TRANSITION_SECONDS = 0.6
+# Loudness of the swoosh. It is only a faint accent: 0.10 is roughly -20 dB
+# below full scale, well under the voice. Lower = quieter, 0.0 = silent.
+SWOOSH_VOLUME = 0.10
+# The voiceover is normalised to a clear, consistent loudness (-14 LUFS, a bit
+# louder than the usual -16 so it stays clearly in front of music and swoosh).
+VOICE_LUFS = -14
 YELLOW = (254, 210, 26)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -731,6 +737,38 @@ def _slide_frame(slide, local_t, S):
     return slide.base.transform((S, S), Image.EXTENT, (cx - L / 2, cy - L / 2, cx + L / 2, cy + L / 2), Image.BILINEAR)
 
 
+def _make_background(W, H, top_text, bottom_text, bottom_highlight=None):
+    """Static part of the look: black bars with the two texts and the yellow separator lines.
+    Returns (background image, height of the top bar, side of the square photo window)."""
+    S = W
+    bars = H - S
+    top_h = int(bars * 0.55)
+    bot_h = bars - top_h
+    line = 6
+    bg = Image.new("RGB", (W, H), BLACK)
+    top_block = render_highlight_block(top_text, pick_highlight_words(top_text), W, top_h - 24, max_lines=3)
+    bg.paste(top_block, (0, 12), top_block)
+    bottom_block = render_highlight_block(
+        bottom_text, bottom_highlight or pick_highlight_words(bottom_text), W, bot_h - 24, max_lines=2)
+    bg.paste(bottom_block, (0, top_h + S + 12), bottom_block)
+    d = ImageDraw.Draw(bg)
+    d.rectangle([0, top_h - line, W, top_h - 1], fill=YELLOW)
+    d.rectangle([0, top_h + S, W, top_h + S + line - 1], fill=YELLOW)
+    return bg, top_h, S
+
+
+def render_cover(image_bytes, top_text, bottom_text, bottom_highlight=None, width=1080, height=1620):
+    """JPEG bytes of the video's look as a still (title bar, photo, call to action),
+    used as the Pinterest video-pin thumbnail so every pin looks like its video."""
+    bg, top_h, S = _make_background(width, height, top_text, bottom_text, bottom_highlight)
+    slides, _ = _prepare_slides([{"bytes": image_bytes, "caption": "", "duration": 3.0}], S)
+    canvas = bg.copy()
+    canvas.paste(_slide_frame(slides[0], 1.0, S), (0, top_h))
+    out = io.BytesIO()
+    canvas.save(out, format="JPEG", quality=88)
+    return out.getvalue()
+
+
 def build_template_video(image_specs, audio_path, work_dir, width=1080, height=1920,
                          top_text="", bottom_text="", bottom_highlight=None,
                          music_path=None, seed=None):
@@ -750,16 +788,7 @@ def build_template_video(image_specs, audio_path, work_dir, width=1080, height=1
     slides, total = _prepare_slides(image_specs, S)
     n_frames = int(round(total * FPS))
 
-    # static background: black, bars with text, yellow separator lines
-    bg = Image.new("RGB", (W, H), BLACK)
-    top_block = render_highlight_block(top_text, pick_highlight_words(top_text), W, top_h - 24, max_lines=3)
-    bg.paste(top_block, (0, 12), top_block)
-    bottom_block = render_highlight_block(
-        bottom_text, bottom_highlight or pick_highlight_words(bottom_text), W, bot_h - 24, max_lines=2)
-    bg.paste(bottom_block, (0, top_h + S + 12), bottom_block)
-    d = ImageDraw.Draw(bg)
-    d.rectangle([0, top_h - line, W, top_h - 1], fill=YELLOW)
-    d.rectangle([0, top_h + S, W, top_h + S + line - 1], fill=YELLOW)
+    bg, top_h, S = _make_background(W, H, top_text, bottom_text, bottom_highlight)
 
     rng = random.Random(seed)
     order = TRANSITIONS[:]
@@ -787,11 +816,13 @@ def build_template_video(image_specs, audio_path, work_dir, width=1080, height=1
     cmd += ["-i", swoosh_path]
     sw_idx = 3 if music_path else 2
     if music_path:
-        af = (f"[1:a]volume=1.0[v];[2:a]volume=0.12[m];[{sw_idx}:a]volume=0.8[s];"
-              f"[v][m][s]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]")
+        af = (f"[1:a]loudnorm=I={VOICE_LUFS}:TP=-1.5:LRA=9,aresample=44100[v];"
+              f"[2:a]volume=0.09[m];[{sw_idx}:a]volume={SWOOSH_VOLUME}[s];"
+              f"[v][m][s]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.97[aout]")
     else:
-        af = (f"[1:a]volume=1.0[v];[{sw_idx}:a]volume=0.8[s];"
-              f"[v][s]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+        af = (f"[1:a]loudnorm=I={VOICE_LUFS}:TP=-1.5:LRA=9,aresample=44100[v];"
+              f"[{sw_idx}:a]volume={SWOOSH_VOLUME}[s];"
+              f"[v][s]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.97[aout]")
     cmd += ["-filter_complex", af, "-map", "0:v", "-map", "[aout]",
             "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", out_path]
