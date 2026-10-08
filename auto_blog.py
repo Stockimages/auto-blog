@@ -391,7 +391,11 @@ _EXPERIENCE_CLAIMS = re.compile(
     r"loved)\b"
     r"|\b(?:my|our) (?:husband|wife|partner|kids|son|daughter|mom|dad|home|house|kitchen|"
     r"apartment|garage|basement|porch|dresser|mantel|living room|bedroom|bathroom)\b"
-    r"|\bwhen I (?:made|built|did|tried|first)\b",
+    r"|\bwhen I (?:made|built|did|tried|first)\b"
+    r"|\b(?:we|our team)\s+(?:tested|tried|found|spent|made|built|baked|painted|bought)\b"
+    r"|\b(?:in|under|after|during)\s+(?:our\s+|real\s+|hands-on\s+)?testing\b"
+    r"|\btesting\s+(?:reveals|revealed|shows|showed|proves|proved|confirms|confirmed)\b"
+    r"|\bour\s+tests?\b",
     re.IGNORECASE,
 )
 
@@ -521,9 +525,9 @@ POST_FORMATS = [
      "instruction": "How to style ONE spot (mantel, shelf, entry table, coffee table, nightstand, porch) in simple layers with easy rules a beginner can follow.",
      "table_hint": "a table with columns Layer, What to use, Approx. cost",
      "title_hint": "e.g. 'How to Style a Mantel in 4 Simple Layers'"},
-    {"name": "tested and myth-busting", "weight": 1, "use_title_styles": False,
-     "instruction": "Test a popular budget decor trick or product type (chalk paint, peel-and-stick, thrifted rugs, thrifted lamps) and report honestly what worked and what didn't.",
-     "table_hint": "a table with columns Method, Result, Verdict",
+    {"name": "myth-busting", "weight": 1, "use_title_styles": False,
+     "instruction": "Examine a popular budget decor trick or product type (chalk paint, peel-and-stick, thrifted rugs, thrifted lamps) and explain honestly, from how the materials generally behave, what usually works, what usually doesn't and why. Do NOT claim anything was tested: never write 'we tested', 'in testing', 'testing revealed' or 'our tests'. Use 'usually', 'often' and 'most people find'.",
+     "table_hint": "a table with columns Method, What usually happens, Verdict",
      "title_hint": "a curious question or honest verdict, e.g. 'Does Peel-and-Stick Backsplash Really Last? What Actually Happens Over Time'. Never write the title in the first person (no 'I' or 'my')."},
 ]
 
@@ -1218,30 +1222,52 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
                                           "data": base64.b64encode(thumb.content).decode()}})
         _vision_state["used"] += 1
 
-        models = [os.environ.get("GEMINI_VISION_MODEL") or FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5]
-        for model in [m for m in models if m]:
-            res = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                params={"key": GEMINI_API_KEY},
-                json={"contents": [{"parts": parts}]},
-                timeout=60,
-            )
-            if res.status_code == 429:
-                print(f"Photo check: quota hit on {model}.")
-                continue
-            if not res.ok:
-                print(f"Photo check failed on {model} ({res.status_code}).")
-                continue
-            text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-            m = re.search(r'"best"\s*:\s*(\d+)', text)
-            if not m:
-                continue
-            idx = int(m.group(1))
-            if idx == 0:
-                return False
-            if 1 <= idx <= len(photos):
-                return photos[idx - 1]
-        _vision_state["disabled"] = True   # every model failed: stop trying for the rest of this run
+        models = [m for m in (os.environ.get("GEMINI_VISION_MODEL"), FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5,
+                              FALLBACK_TEXT_MODEL_3, FALLBACK_TEXT_MODEL_2) if m]
+        models = list(dict.fromkeys(models))
+        dead = _vision_state.setdefault("dead", set())   # models out of quota (429) for this run
+        for attempt_round in range(2):
+            # round 2 (after a pause) only retries the first two models, to bound the time a bad spell can cost
+            for model in (models if attempt_round == 0 else models[:2]):
+                if model in dead:
+                    continue
+                try:
+                    res = requests.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                        params={"key": GEMINI_API_KEY},
+                        json={"contents": [{"parts": parts}]},
+                        timeout=45,
+                    )
+                except Exception as e:
+                    print(f"Photo check: {model} timed out or failed ({str(e)[:80]}).")
+                    continue
+                if res.status_code == 429:
+                    print(f"Photo check: quota hit on {model}.")
+                    dead.add(model)
+                    continue
+                if not res.ok:
+                    print(f"Photo check failed on {model} ({res.status_code}).")
+                    continue
+                try:
+                    text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue
+                m = re.search(r'"best"\s*:\s*(\d+)', text)
+                if not m:
+                    continue
+                _vision_state["fails"] = 0
+                idx = int(m.group(1))
+                if idx == 0:
+                    return False
+                if 1 <= idx <= len(photos):
+                    return photos[idx - 1]
+            if attempt_round == 0 and any(mm not in dead for mm in models):
+                time.sleep(6)   # "high demand" spikes are short: one more round after a pause
+        # Nothing answered. 503s are temporary, so the check is only switched off for the rest of
+        # the run after 3 calls in a row failed (or when every model is out of quota).
+        _vision_state["fails"] = _vision_state.get("fails", 0) + 1
+        if _vision_state["fails"] >= 3 or all(mm in dead for mm in models):
+            _vision_state["disabled"] = True
         return None
     except Exception as e:
         print(f"Photo check skipped ({e}).")
@@ -1422,6 +1448,10 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
         print(f"Photo check: none fit '{query}' — using the best description match.")
     if photo is None:
         best_score = _photo_match_score(ranked[0], words)
+        if verdict is None and strict and words and best_score < min(2, len(words)):
+            # The check was unavailable AND the description barely matches: better no photo than
+            # an unverified, probably unrelated one (a dining room under "halloween shelf decor").
+            raise RuntimeError(f"No verified photo for '{query}' (photo check unavailable, weak description match)")
         top = [p for p in ranked[:3] if _photo_match_score(p, words) == best_score] or ranked[:1]
         photo = random.choice(top)
 
@@ -3016,5 +3046,5 @@ if __name__ == "__main__":
         print(f"No post was published ({e}). Waiting {wait_minutes} minutes, then trying once more...")
         time.sleep(wait_minutes * 60)
         _DEAD_MODELS.clear()
-        _vision_state.update(used=0, disabled=False)
+        _vision_state.update(used=0, disabled=False, fails=0, dead=set())
         main()
