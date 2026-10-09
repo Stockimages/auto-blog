@@ -457,6 +457,13 @@ def find_quality_problems(draft, min_words=600):
     if brand:
         problems.append(f"names a brand/store/product: \"{brand.group(0)}\"")
 
+    examples = {
+        e.strip().lower()
+        for text in [f.get("title_hint", "") for f in POST_FORMATS] + list(TITLE_STYLES)
+        for e in re.findall(r"""['"]([^'"]{20,})['"]""", text)
+    }
+    if draft.get("title", "").strip().lower() in examples:
+        problems.append("title was copied word for word from an example in the prompt")
     if re.match(r"^[A-Z][A-Z0-9 \-]{3,}:\s", draft.get("title", "")):
         problems.append("title starts with a capitalised label such as \"BEFORE-AND-AFTER:\"")
 
@@ -505,34 +512,34 @@ POST_FORMATS = [
     {"name": "listicle", "weight": 3, "use_title_styles": False,
      "instruction": "A numbered list post of 5-9 ideas. Each idea gets its own h2/h3 with a concrete tip, a rough cost and why it works. NOT a single step-by-step project and NOT the 'turn X into Y' framing. Costs are PER IDEA: total_cost must be the range of the per-idea costs in your table (for example \"$6-$30 per idea\"), and the closing paragraph must state that same per-idea range, never a single total that contradicts the table.",
      "table_hint": "a summary table with columns Idea, Approx. cost, Time",
-     "title_hint": "number-led and specific, e.g. '7 Budget Ways to Make a Small Bedroom Feel Bigger'"},
+     "title_hint": "number-led and specific, in your own words, for example '7 Budget Ways to Make a Small Bedroom Feel Bigger' or '5 Easy Swaps That Make a Rental Kitchen Look Custom' or '9 Thrift Finds That Look Expensive on a Shelf'"},
     {"name": "room refresh plan", "weight": 2, "use_title_styles": False,
      "instruction": "A whole-room (or whole-area) refresh plan on a budget: what to change first, what to skip, and the order to do it in.",
      "table_hint": "a shopping list with columns Item, Where to buy, Price",
-     "title_hint": "budget-led, e.g. 'A Cozy Living Room Refresh for Under $150'"},
+     "title_hint": "budget-led, in your own words, for example 'A Cozy Living Room Refresh for Under $150' or 'How to Refresh a Tiny Bathroom for Under $60' or 'A Weekend Entryway Makeover on a Real Budget'"},
     {"name": "thrift buying guide", "weight": 2, "use_title_styles": False,
      "instruction": "A guide to buying a type of item second-hand: what to look for, red flags, fair prices, where to find it.",
      "table_hint": "a table with columns What to look for, Fair price, Red flags",
-     "title_hint": "practical, e.g. 'What to Look For When Thrifting a Solid Wood Dresser'"},
+     "title_hint": "practical and specific to the item, in your own words, for example 'How to Spot a Solid Wood Dresser at the Thrift Store' or 'Buying Second-Hand Mirrors: What to Check Before You Pay' or 'Thrifted Lamps: Which Ones Are Worth Rewiring'. Do not start with 'What to Look For When Thrifting'."},
     {"name": "mistakes and fixes", "weight": 2, "use_title_styles": False,
      "instruction": "Common mistakes that make a room look cheap, cluttered or dated, each paired with a specific, inexpensive fix. Costs are PER FIX: total_cost must be the range of the per-fix costs in your table, and any total you state in the text must equal the sum of the table.",
      "table_hint": "a table with columns Mistake, Quick fix, Cost",
-     "title_hint": "e.g. '6 Mistakes That Make Your Entryway Look Cluttered (and How to Fix Them)'. Never use the words 'cheap' twice in the title."},
+     "title_hint": "in your own words, for example '6 Mistakes That Make Your Entryway Look Cluttered (and How to Fix Them)' or '5 Lighting Mistakes That Make a Bedroom Feel Cold' or 'Why Your Shelves Look Messy and What to Do About It'. Never use the word 'cheap' twice in the title."},
     {"name": "project walkthrough with pitfalls", "weight": 2, "use_title_styles": True, "needs_list": True,
      "instruction": "A walkthrough of one makeover that is honest about what can go wrong: the common pitfalls at each step, how to avoid them, and what the finished result should look like. Written as a guide ('you'), NOT as a personal story.",
      "table_hint": "a table of what you bought and what it cost, columns Item, Price"},
     {"name": "designer look for less", "weight": 2, "use_title_styles": False,
      "instruction": "Recreate a high-end look with budget or thrifted alternatives. Describe the pricey version in general terms (never name a brand, store or product) and compare it to the budget version piece by piece.",
      "table_hint": "a comparison table with columns High-end version (described, not named), Budget version, Typical savings (a range)",
-     "title_hint": "e.g. 'The Designer Mantel Look for a Fraction of the Price'"},
+     "title_hint": "in your own words, for example 'The Designer Mantel Look for a Fraction of the Price' or 'Get a Boutique Hotel Bedroom Look Without the Price' or 'Expensive-Looking Shelves Made From Thrift Finds'"},
     {"name": "styling guide", "weight": 2, "use_title_styles": False,
      "instruction": "How to style ONE spot (mantel, shelf, entry table, coffee table, nightstand, porch) in simple layers with easy rules a beginner can follow.",
      "table_hint": "a table with columns Layer, What to use, Approx. cost",
-     "title_hint": "e.g. 'How to Style a Mantel in 4 Simple Layers'"},
+     "title_hint": "in your own words, for example 'How to Style a Mantel in 4 Simple Layers' or 'A Simple Way to Style Your Coffee Table Like a Designer' or 'Bookshelf Styling Rules Anyone Can Follow'"},
     {"name": "myth-busting", "weight": 1, "use_title_styles": False,
      "instruction": "Examine a popular budget decor trick or product type (chalk paint, peel-and-stick, thrifted rugs, thrifted lamps) and explain honestly, from how the materials generally behave, what usually works, what usually doesn't and why. Do NOT claim anything was tested: never write 'we tested', 'in testing', 'testing revealed' or 'our tests'. Use 'usually', 'often' and 'most people find'.",
      "table_hint": "a table with columns Method, What usually happens, Verdict",
-     "title_hint": "a curious question or honest verdict, e.g. 'Does Peel-and-Stick Backsplash Really Last? What Actually Happens Over Time'. Never write the title in the first person (no 'I' or 'my')."},
+     "title_hint": "a curious question or honest verdict, in your own words, for example 'Does Peel-and-Stick Backsplash Really Last? What Actually Happens Over Time' or 'Is Chalk Paint Worth It on Old Furniture?' or 'Do Thrifted Rugs Hold Up in a Busy Hallway?'. Never write the title in the first person (no 'I' or 'my')."},
 ]
 
 # month -> (themes for right now, themes for roughly the next 4-6 weeks).
@@ -676,12 +683,14 @@ def generate_draft(history, niche):
             f"TITLE STYLE for THIS post (the site's titles had become too similar to each\n"
             f"other, so follow this one): {title_style}. Do NOT start the title with\n"
             f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W". Write the '
-            f'title in normal sentence case; never begin it with a label in capital letters followed by a colon.'
+            f'title in normal sentence case; never begin it with a label in capital letters followed by a colon. '
+            f'Never copy an example title word for word.'
         )
     else:
         title_line = (
             f"TITLE for THIS post: {fmt['title_hint']}. Do NOT start the title with\n"
-            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W".'
+            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W". '
+            f'Never copy an example title word for word.'
         )
 
     # Count how many past posts fell in each fixed category so we can nudge
@@ -1608,12 +1617,13 @@ def fix_listicle_cost(draft):
         amount = lambda t: [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", t)]
         fmt_amt = lambda v: f"${v:g}"
 
-        unit = {"listicle": "per idea", "mistakes and fixes": "per fix"}.get(fmt)
-        if unit:
+        unit = {"listicle": "per idea", "mistakes and fixes": "per fix", "thrift buying guide": ""}.get(fmt)
+        if unit is not None:
             amounts = [v for row in rows[1:] for cell in row for v in amount(cell)]
             if len(amounts) >= 2:
                 lo, hi = min(amounts), max(amounts)
-                draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)} {unit}" if lo != hi else f"{fmt_amt(lo)} {unit}")
+                suffix = f" {unit}" if unit else ""
+                draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)}{suffix}" if lo != hi else f"{fmt_amt(lo)}{suffix}")
             if fmt == "listicle":
                 header = [c.lower() for c in rows[0]]
                 if any("time" in c for c in header):
