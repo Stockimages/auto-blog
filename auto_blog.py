@@ -339,6 +339,7 @@ _TITLE_FILLER = {
     "layer", "layers", "simple", "style", "styled", "styling", "elegant", "perfect", "beautiful",
     "stunning", "gorgeous", "ultimate", "complete", "essential",
     "designer", "fraction", "price", "cheap", "expensive", "less", "worth",
+    "fix", "fixes", "them", "cluttered", "clutter", "space", "spaces", "before", "after",
 }
 
 
@@ -456,6 +457,9 @@ def find_quality_problems(draft, min_words=600):
     if brand:
         problems.append(f"names a brand/store/product: \"{brand.group(0)}\"")
 
+    if re.match(r"^[A-Z][A-Z0-9 \-]{3,}:\s", draft.get("title", "")):
+        problems.append("title starts with a capitalised label such as \"BEFORE-AND-AFTER:\"")
+
     # Prices in the title must agree with the article's own table (a title said
     # "$12 Thrifted Plastic Basket" while the table priced the basket at $6).
     title = draft.get("title", "")
@@ -476,12 +480,12 @@ def find_quality_problems(draft, min_words=600):
 
 
 TITLE_STYLES = [
-    "RESULT-FIRST: lead with the transformation, e.g. \"This $9 Thrifted Lamp Now Looks Like a $300 Designer Piece\"",
-    "QUESTION: a curious question the project answers, e.g. \"Can a $12 Thrifted Mirror Really Pass for Antique Brass?\"",
-    "COST-LED: lead with the budget, e.g. \"A Hanging Planter From a Thrifted Colander for Under $20\"",
-    "PLAIN DIY: a clear search-friendly tutorial title, e.g. \"DIY Aged Brass Boot Tray From a Thrifted Metal Tray\"",
-    "BEFORE-AND-AFTER: e.g. \"From Thrift Store Colander to Zinc Planter: A $18 Makeover\"",
-    "BUDGET ANGLE: lead with the saving, e.g. \"A $20 Entryway Bench That Looks Like It Cost $400\"",
+    "lead with the transformation, e.g. \"This $9 Thrifted Lamp Now Looks Like a $300 Designer Piece\"",
+    "a curious question the project answers, e.g. \"Can a $12 Thrifted Mirror Really Pass for Antique Brass?\"",
+    "lead with the budget, e.g. \"A Hanging Planter From a Thrifted Colander for Under $20\"",
+    "a clear, search-friendly tutorial title, e.g. \"DIY Aged Brass Boot Tray From a Thrifted Metal Tray\"",
+    "a from-to makeover title, e.g. \"From Thrift Store Colander to Zinc Planter: A $18 Makeover\"",
+    "lead with the saving, e.g. \"A $20 Entryway Bench That Looks Like It Cost $400\"",
 ]
 
 
@@ -671,7 +675,8 @@ def generate_draft(history, niche):
         title_line = (
             f"TITLE STYLE for THIS post (the site's titles had become too similar to each\n"
             f"other, so follow this one): {title_style}. Do NOT start the title with\n"
-            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W".'
+            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W". Write the '
+            f'title in normal sentence case; never begin it with a label in capital letters followed by a colon.'
         )
     else:
         title_line = (
