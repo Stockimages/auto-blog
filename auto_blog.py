@@ -1063,6 +1063,10 @@ def normalize_draft(draft):
     if not draft.get("pin_hook"):
         warn("pin_hook", "the title")
         draft["pin_hook"] = draft["title"]
+    # a missing dollar sign made one cover read "UNDER 35": "under 35" -> "under $35"
+    draft["pin_hook"] = re.sub(
+        r"\b(under|below|less than)\s+(\d+(?:\.\d+)?)\b(?!\s*(?:min|hour|hr|day|week|step|way|tip|idea|item|piece))",
+        r"\1 $\2", draft["pin_hook"], flags=re.IGNORECASE)
 
     # Optional: Pinterest-search description. If missing/malformed, the old
     # behavior (excerpt of the opening paragraph) is used instead.
@@ -2850,18 +2854,17 @@ def main():
         # just because a category is new/thin). Still fully static (baked
         # into the HTML at publish time) — no extra JS/network request on
         # page load, so there's no page-speed trade-off.
-        same_category = [
-            h for h in history
-            if h.get("category") == category and h.get("url")
-        ]
-        related = list(reversed(same_category[-3:]))
-        if len(related) < 3:
-            related_urls = {h["url"] for h in related}
-            most_recent = [
-                h for h in reversed(history)
-                if h.get("url") and h["url"] not in related_urls
-            ]
-            related = related + most_recent[: 3 - len(related)]
+        related, seen_titles = [], set()
+
+        def add_related(candidates):
+            for h in candidates:
+                key = re.sub(r"\W+", " ", h.get("title", "").lower()).strip()
+                if h.get("url") and key and key not in seen_titles and len(related) < 3:
+                    seen_titles.add(key)
+                    related.append(h)
+
+        add_related(reversed([h for h in history if h.get("category") == category]))
+        add_related(reversed(history))   # fill the rest with the newest posts, never repeating a title
         related_posts_html = ""
         if related:
             items = "".join(
