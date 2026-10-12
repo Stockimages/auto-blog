@@ -1621,7 +1621,8 @@ def fix_listicle_cost(draft):
         amount = lambda t: [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", t)]
         fmt_amt = lambda v: f"${v:g}"
 
-        unit = {"listicle": "per idea", "mistakes and fixes": "per fix", "thrift buying guide": ""}.get(fmt)
+        unit = {"listicle": "per idea", "mistakes and fixes": "per fix", "thrift buying guide": "",
+                "myth-busting": "per method"}.get(fmt)
         if unit is not None:
             amounts = [v for row in rows[1:] for cell in row for v in amount(cell)]
             if len(amounts) >= 2:
