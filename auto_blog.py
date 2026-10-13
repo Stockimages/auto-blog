@@ -731,6 +731,17 @@ HONESTY RULES (important):
   or "similar pieces often sell for $300-$450". In titles prefer "under $20"
   or "for about $20" over an exact figure.
 
+CONSISTENCY RULES (readers notice contradictions, so check these before you answer):
+- Every number you state (price, length, size, quantity, time) must be identical everywhere in the
+  post: intro, steps, table, closing, FAQ and quick facts. If you mention what a store-bought or
+  high-end version costs more than once, use exactly the same figure or range each time.
+- Prices written in the text next to the table must match the table's numbers exactly.
+- Material lengths must add up: the stock you list (for example one 48-inch dowel) must be long
+  enough for every piece you tell the reader to cut from it. Multiply count x length and check it
+  against the stock length before you write it; list the right stock size instead.
+- The materials list, the steps and the FAQ must agree on tools: never say that no power tools
+  are needed if any step uses a drill or a saw.
+
 Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
@@ -1225,14 +1236,14 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
             f"You are choosing a photo for a budget home-decor blog. The photo should clearly "
             f"show: \"{query}\".{context_line} Below are {len(photos)} candidate photos, numbered in order. "
             f"Pick the ONE that best matches those keywords and looks like a clean, real interior "
-            f"or decor photo (not mostly text or graphics). REJECT any photo where a person or a "
-            f"face is visible, any photo with clearly readable words or lettering, and any photo "
+            f"or decor photo (not mostly text or graphics). REJECT any photo where any part of a person is visible: a face, hands, arms, a back or a "
+            f"blurry or out-of-focus person in the background. Also reject any photo with clearly readable words or lettering, and any photo "
             f"showing Christmas or Halloween decor unless the keywords ask for that holiday. "
             f"If none of them genuinely fit, answer 0. "
             f"Reply with ONLY JSON like {{\"best\": 2}}."
         )}]
         for i, p in enumerate(photos, start=1):
-            thumb = robust_request("GET", p["src"].get("medium") or p["src"]["small"], timeout=30)
+            thumb = robust_request("GET", p["src"].get("large") or p["src"].get("medium") or p["src"]["small"], timeout=30)
             if not thumb.ok:
                 return None
             parts.append({"text": f"Photo {i}:"})
@@ -2495,6 +2506,11 @@ def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False):
     return status
 
 
+# Set to True the moment main() is about to call Blogger's publish API. Any failure BEFORE that
+# point means nothing went live anywhere, so the whole run can safely be retried once.
+_run_state = {"publish_started": False}
+
+
 def main():
     config = load_config()
     niche = config.get("niche", DEFAULT_NICHE)
@@ -2932,6 +2948,7 @@ def main():
 
         print("Publishing to Blogger...")
         access_token = get_access_token()
+        _run_state["publish_started"] = True   # from here on a failure is NOT retried (could duplicate a post)
         result = publish_post(
             access_token, draft["title"], full_html, draft.get("labels", []),
             search_description=social_description,
@@ -3054,10 +3071,12 @@ description=extract_pin_description(
 if __name__ == "__main__":
     try:
         main()
-    except RuntimeError as e:
-        # Only when nothing was published (so a retry can't create a duplicate post):
-        # Gemini rate limits recover within minutes, so wait and try once more.
-        if "Nothing was published" not in str(e):
+    except Exception as e:
+        # Retry once, but ONLY if the failure happened before Blogger's publish call: then nothing
+        # was published anywhere, so a retry can't create a duplicate post. Typical cause: Gemini
+        # "high demand" (503) spells, which usually pass within minutes. A failure after the
+        # publish call is never retried.
+        if _run_state["publish_started"]:
             raise
         wait_minutes = int(os.environ.get("PREPUBLISH_RETRY_MINUTES", "15"))
         if wait_minutes <= 0:
@@ -3066,4 +3085,5 @@ if __name__ == "__main__":
         time.sleep(wait_minutes * 60)
         _DEAD_MODELS.clear()
         _vision_state.update(used=0, disabled=False, fails=0, dead=set())
+        _run_state["publish_started"] = False
         main()
