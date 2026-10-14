@@ -1180,11 +1180,12 @@ VISION_CHECKS_PER_RUN = 36      # cap on Gemini photo-check calls per run (a vid
 _vision_state = {"used": 0, "disabled": False}
 
 
+# Photos are only dropped when their description suggests a visible FACE. Plain "woman", "man",
+# "person" or "people" are allowed (hands, back views...); Gemini's photo check rejects any face it sees.
 _PEOPLE_WORDS = {
-    "woman", "women", "man", "men", "girl", "boy", "person", "people", "child", "children",
-    "kid", "kids", "baby", "couple", "family", "portrait", "smiling", "model", "lady", "guy",
-    "mother", "father", "bride", "groom", "friends", "teen", "toddler", "selfie", "face",
-    "faces", "male", "female", "santa", "wearing",
+    "girl", "boy", "child", "children", "kid", "kids", "baby", "couple", "family", "portrait",
+    "smiling", "model", "mother", "father", "bride", "groom", "friends", "toddler", "selfie",
+    "face", "faces", "santa",
 }
 
 
@@ -1251,14 +1252,15 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
             f"You are choosing a photo for a budget home-decor blog. The photo should clearly "
             f"show: \"{query}\".{context_line} Below are {len(photos)} candidate photos, numbered in order. "
             f"Pick the ONE that best matches those keywords and looks like a clean, real interior "
-            f"or decor photo (not mostly text or graphics). REJECT any photo where any part of a person is visible: a face, hands, arms, a back or a "
-            f"blurry or out-of-focus person in the background. Also reject any photo with clearly readable words or lettering, and any photo "
+            f"or decor photo (not mostly text or graphics). The photo must be clearly relevant to the keywords, so if none of the candidates shows that subject, answer 0. "
+            f"People in the photo are fine. REJECT only a photo where a person's FACE is clearly visible; a blurred or out-of-focus face, hands, arms, a back view or a body without a visible face are fine. "
+            f"Also reject any photo with clearly readable words or lettering, and any photo "
             f"showing Christmas or Halloween decor unless the keywords ask for that holiday. "
             f"If none of them genuinely fit, answer 0. "
             f"Reply with ONLY JSON like {{\"best\": 2}}."
         )}]
         for i, p in enumerate(photos, start=1):
-            thumb = robust_request("GET", p["src"].get("large") or p["src"].get("medium") or p["src"]["small"], timeout=30)
+            thumb = robust_request("GET", p["src"].get("medium") or p["src"]["small"], timeout=30)
             if not thumb.ok:
                 return None
             parts.append({"text": f"Photo {i}:"})
@@ -1454,7 +1456,7 @@ def search_pexels_image(query, orientation="portrait", used_photo_ids=None, targ
                 key=lambda p: abs((p["width"] / p["height"]) - target_ratio),
             )]
 
-    # No photos with people/faces: drop any whose description mentions them
+    # No photos with visible faces: drop any whose description suggests one
     # (if every result has people, keep them all; Gemini's check below
     # still rejects those if it can).
     without_people = [p for p in pool if not _photo_has_people(p)]
@@ -1528,6 +1530,28 @@ def find_best_photo(queries, ideal, orientation, used_photo_ids, target_ratio=No
                                strict=strict, ideal=ideal, subject=subject)
 
 
+def _json_values(text):
+    """
+    Yields every complete JSON value found in `text`, in order, ignoring code fences and any
+    prose before, between or after them (models sometimes add a note or a second object).
+    """
+    text = (text or "").replace("```json", "").replace("```", "")
+    dec = json.JSONDecoder()
+    pos = 0
+    while pos < len(text):
+        starts = [i for i in (text.find("{", pos), text.find("[", pos)) if i != -1]
+        if not starts:
+            return
+        start = min(starts)
+        try:
+            value, end = dec.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            pos = start + 1
+            continue
+        yield value
+        pos = start + max(end, 1)
+
+
 def plan_photo_queries(draft, n_extra=4):
     """
     One focused Gemini call, made AFTER the article is written, that plans
@@ -1581,11 +1605,21 @@ def plan_photo_queries(draft, n_extra=4):
                 print(f"Photo planning: {model} returned {res.status_code}, trying the next model.")
                 continue
             text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            if not m:
+            items = None
+            for value in _json_values(text):
+                if isinstance(value, dict) and isinstance(value.get("photos"), list):
+                    items = value["photos"]
+                    break
+                if isinstance(value, list) and any(isinstance(v, dict) and "slot" in v for v in value):
+                    items = value   # a bare list of slot entries
+                    break
+            if items is None:
+                print(f"Photo planning: {model} gave no usable JSON, trying the next model.")
                 continue
             plan = {}
-            for item in json.loads(m.group(0)).get("photos", []):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
                 slot = item.get("slot")
                 queries = [q.strip() for q in item.get("queries", [])
                            if isinstance(q, str) and 0 < len(q.split()) <= 6]
