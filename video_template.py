@@ -653,10 +653,11 @@ def synthesize_gemini_voiceover(text, out_path, api_key, voice=None, models=None
     import requests
 
     voice = voice or os.environ.get("GEMINI_TTS_VOICE", "Zephyr")
-    models = models or [
-        m for m in (os.environ.get("GEMINI_TTS_MODEL"), "gemini-2.5-flash-preview-tts",
-                    "gemini-2.5-pro-preview-tts") if m
-    ]
+    # gemini-2.5-*-preview-tts shut down on 17 Nov 2026 (earliest date); replaced by the 3.8 TTS models.
+    models = models or list(dict.fromkeys(
+        m for m in (os.environ.get("GEMINI_TTS_MODEL"), "gemini-3.8-flash-tts",
+                    "gemini-3.8-flash-lite-tts") if m
+    ))
     prompt = "Read this as a warm, light, friendly voiceover at a relaxed, natural pace: " + text
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
