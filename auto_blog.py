@@ -210,6 +210,10 @@ FALLBACK_TEXT_MODEL_2 = os.environ.get("GEMINI_FALLBACK_MODEL_2", "gemini-3.6-fl
 FALLBACK_TEXT_MODEL_3 = os.environ.get("GEMINI_FALLBACK_MODEL_3", "gemini-3.5-flash")
 FALLBACK_TEXT_MODEL_4 = os.environ.get("GEMINI_FALLBACK_MODEL_4", "gemini-3.5-flash-lite")
 FALLBACK_TEXT_MODEL_5 = os.environ.get("GEMINI_FALLBACK_MODEL_5", "gemini-3.1-flash-lite")
+# Gemma 4 (open models served through the same Gemini API) — extra backups placed after
+# gemini-3.5-flash-lite and before gemini-3.1-flash-lite, following the quality ranking.
+GEMMA_MODEL_1 = os.environ.get("GEMMA_MODEL_1", "gemma-4-31b-it")
+GEMMA_MODEL_2 = os.environ.get("GEMMA_MODEL_2", "gemma-4-26b-a4b-it")
 
 HISTORY_FILE = "topics_history.json"
 MAX_TOPIC_ATTEMPTS = 4  # tries to get a non-duplicate topic before skipping the run
@@ -928,14 +932,17 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
 
     # If the primary model is overloaded/unavailable, fall back through a chain of models
     # rather than failing the run — each model has its own separate free-tier daily quota, so
-    # trying 6 different ones is far more likely to land a working one than retrying a single
+    # trying several different ones is far more likely to land a working one than retrying a single
     # model repeatedly. The two "-lite" models at the end have a much higher daily quota than
     # the regular flash models, so they're kept as the last resort.
     top_models = []
-    for m in [TEXT_MODEL, FALLBACK_TEXT_MODEL, FALLBACK_TEXT_MODEL_2, FALLBACK_TEXT_MODEL_3]:
+    for m in [TEXT_MODEL, FALLBACK_TEXT_MODEL]:   # gemini-3.8-flash, gemini-3.7-flash (3.6 / 3.5 flash removed from the article chain)
         if m and m not in top_models:
             top_models.append(m)
-    lite_models = [m for m in [FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5] if m and m not in top_models]
+    lite_models = []
+    for m in [FALLBACK_TEXT_MODEL_4, GEMMA_MODEL_1, GEMMA_MODEL_2, FALLBACK_TEXT_MODEL_5]:
+        if m and m not in top_models and m not in lite_models:
+            lite_models.append(m)
     # "High demand" (HTTP 503) spikes usually pass within a minute, and the lite models write
     # noticeably shorter, less obedient articles, so the top models get a second pass after a
     # short wait before falling back to the lite ones.
@@ -998,10 +1005,13 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                     text = text.replace("```json", "").replace("```", "").strip()
                     try:
                         parsed = json.loads(text)
-                        if isinstance(parsed, dict):
-                            parsed["_format"] = fmt["name"]
-                            parsed["_theme"] = plan["theme"]
-                            parsed["_model"] = model
+                        if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+                            parsed = parsed[0]   # a one-element list wrapping the article object
+                        if not isinstance(parsed, dict):
+                            raise json.JSONDecodeError("expected a JSON object", text, 0)   # handled like invalid JSON below
+                        parsed["_format"] = fmt["name"]
+                        parsed["_theme"] = plan["theme"]
+                        parsed["_model"] = model
                         print(f"Article written by {model}.")
                         return parsed
                     except json.JSONDecodeError as e:
@@ -1022,6 +1032,11 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                 last_error = f"HTTP {res.status_code}: {res.text[:200]}"
 
                 if not transient:
+                    if model.startswith("gemma") and not is_final_attempt_ever:
+                        # an unavailable / unsupported Gemma model: skip it, keep going down the list
+                        print(f"[{model}] not usable ({res.status_code}: {res.text[:120]}), switching to fallback model...")
+                        _DEAD_MODELS.add(model)
+                        continue
                     raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
 
                 if is_last_attempt_for_model and is_final_attempt_ever:
@@ -1975,6 +1990,23 @@ def publish_post(access_token, title, html, labels, search_description=None):
     return res.json()
 
 
+def _report_unsaved_secret(secret_name, secret_value, reason):
+    """
+    The repo (and so its Actions logs) is public, so a new secret value must NEVER be printed
+    there. When it could not be saved automatically, it is emailed to NOTIFY_EMAIL instead.
+    """
+    print(f"{reason} The new {secret_name} value is NOT printed here because the logs are public.")
+    if GMAIL_ADDRESS and GMAIL_APP_PASSWORD and NOTIFY_EMAIL:
+        send_phone_notification(
+            f"ACTION NEEDED: update GitHub secret {secret_name}",
+            f"{reason}\n\nSet the repository secret {secret_name} to this new value:\n\n{secret_value}\n",
+        )
+        print(f"Tried to email the new {secret_name} value to NOTIFY_EMAIL (see the result line above/below).")
+    else:
+        print(f"Email is not configured, so the new {secret_name} value could not be delivered; "
+              f"it will have to be re-created manually.")
+
+
 def update_github_secret(secret_name, secret_value):
     """
     Updates a GitHub Actions repository secret via the API, so tokens that
@@ -1984,9 +2016,7 @@ def update_github_secret(secret_name, secret_value):
     it never raises, so a missing PAT never breaks the actual publish run.
     """
     if not GH_SECRETS_PAT:
-        print(f"GH_SECRETS_PAT not set — could not auto-update {secret_name}. "
-              f"New value (update it manually):")
-        print(secret_value)
+        _report_unsaved_secret(secret_name, secret_value, "GH_SECRETS_PAT is not set, so the secret was not auto-updated.")
         return
 
     try:
@@ -2020,8 +2050,7 @@ def update_github_secret(secret_name, secret_value):
         else:
             print(f"Failed to auto-update {secret_name} ({put_res.status_code}): {put_res.text}")
     except Exception as e:
-        print(f"Could not auto-update {secret_name} (new value below, update manually): {e}")
-        print(secret_value)
+        _report_unsaved_secret(secret_name, secret_value, f"Could not auto-update the secret: {e}")
 
 
 def get_pinterest_access_token():
