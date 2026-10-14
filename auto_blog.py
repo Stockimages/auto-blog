@@ -935,35 +935,28 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
     # trying several different ones is far more likely to land a working one than retrying a single
     # model repeatedly. The two "-lite" models at the end have a much higher daily quota than
     # the regular flash models, so they're kept as the last resort.
+    # gemini-3.8-flash / 3.7-flash are deliberately NOT in the article chain any more: on the free tier
+    # they are almost always busy (503) or out of quota (429) and only cost time. To bring a model
+    # back, put it in this list.
     top_models = []
-    for m in [TEXT_MODEL, FALLBACK_TEXT_MODEL]:   # gemini-3.8-flash, gemini-3.7-flash (3.6 / 3.5 flash removed from the article chain)
-        if m and m not in top_models:
-            top_models.append(m)
     lite_models = []
-    for m in [FALLBACK_TEXT_MODEL_4, GEMMA_MODEL_1, GEMMA_MODEL_2, FALLBACK_TEXT_MODEL_5]:
+    for m in [GEMMA_MODEL_1, FALLBACK_TEXT_MODEL_4, GEMMA_MODEL_2, FALLBACK_TEXT_MODEL_5]:   # Gemma 31B goes before the lite model that often writes too-short articles
         if m and m not in top_models and m not in lite_models:
             lite_models.append(m)
-    # "High demand" (HTTP 503) spikes usually pass within a minute, and the lite models write
-    # noticeably shorter, less obedient articles, so the top models get a second pass after a
-    # short wait before falling back to the lite ones.
-    models_to_try = top_models + ["__WAIT__"] + top_models + lite_models
+    # Every model is tried exactly once per article request: no second pass and no waiting in
+    # between (saves quota and time). The 15-minute retry of the whole run still exists below.
+    models_to_try = top_models + lite_models
 
     last_error = None
-    num_cycles = 1  # one pass through the whole model list — with 6 models to try, each
+    num_cycles = 1  # one pass through the whole model list — with 4 models to try, each
     # contributing its own separate quota, there's no need to loop back and re-try the exact
-    # same 6 models again; that would just burn quota with attempts already known to fail.
+    # same 4 models again; that would just burn quota with attempts already known to fail.
     cycle_wait = 0
 
     for cycle in range(1, num_cycles + 1):
         is_last_cycle = cycle == num_cycles
 
         for model_index, model in enumerate(models_to_try):
-            if model == "__WAIT__":
-                if any(m not in _DEAD_MODELS for m in top_models):
-                    wait = int(os.environ.get("GEMINI_TOP_RETRY_SECONDS", "45"))
-                    print(f"The top Gemini models are busy — waiting {wait}s, then trying them once more...")
-                    time.sleep(wait)
-                continue
             if model in _DEAD_MODELS and model_index < len(models_to_try) - 1:
                 continue
             is_last_model = model_index == len(models_to_try) - 1
@@ -3146,7 +3139,8 @@ if __name__ == "__main__":
             raise
         print(f"No post was published ({e}). Waiting {wait_minutes} minutes, then trying once more...")
         time.sleep(wait_minutes * 60)
-        _DEAD_MODELS.clear()
-        _vision_state.update(used=0, disabled=False, fails=0, dead=set())
+        # Models that already hit their quota (429) or are unavailable stay dead during the retry:
+        # _DEAD_MODELS and _vision_state["dead"] are deliberately NOT cleared here.
+        _vision_state.update(used=0, disabled=False, fails=0)
         _run_state["publish_started"] = False
         main()
