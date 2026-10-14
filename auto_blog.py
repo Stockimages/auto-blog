@@ -37,7 +37,7 @@ import smtplib
 import urllib.parse
 from email.mime.text import MIMEText
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 from requests_oauthlib import OAuth1Session
@@ -592,6 +592,48 @@ def theme_expired(theme, today):
     return any(key in t and (today.month, today.day) > cutoff for key, cutoff in THEME_EXPIRY)
 
 
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def post_out_of_season(h, today=None):
+    """
+    True for an older holiday post that isn't worth showing right now (e.g. a Halloween post after
+    8 October). A post counts as in season during the 90 days before its holiday's last-useful date
+    (THEME_EXPIRY), judged from its title + saved theme. Posts that mention no holiday are never
+    out of season. If it mentions several holidays, it stays as long as any one of them is in season.
+    """
+    today = today or _utcnow()
+    text = f"{h.get('theme') or ''} {h.get('title') or ''}".lower()
+    matched = [(key, cutoff) for key, cutoff in THEME_EXPIRY if key in text]
+    if not matched:
+        return False
+    for key, (month, day) in matched:
+        for year in (today.year - 1, today.year, today.year + 1):
+            end = datetime(year, month, day, tzinfo=timezone.utc)
+            if end - timedelta(days=90) <= today <= end + timedelta(days=1):
+                return False
+    return True
+
+
+def pick_related_posts(history, category, today=None, limit=3):
+    """Up to `limit` posts for the "You Might Also Like" box: same category first, then the newest
+    posts overall, never repeating a title and never an out-of-season holiday post."""
+    related, seen_titles = [], set()
+
+    def add_related(candidates):
+        for h in candidates:
+            key = re.sub(r"\W+", " ", h.get("title", "").lower()).strip()
+            if h.get("url") and key and key not in seen_titles and len(related) < limit:
+                seen_titles.add(key)
+                related.append(h)
+
+    in_season = [h for h in history if not post_out_of_season(h, today)]
+    add_related(reversed([h for h in in_season if h.get("category") == category]))
+    add_related(reversed(in_season))
+    return related
+
+
 # Share of posts that follow the season, by month: highest in Oct-Dec, when
 # Pinterest holiday searches (and ad rates, generally) peak; lower in the rest
 # of the year so more evergreen posts build up for Google over time.
@@ -664,7 +706,7 @@ def generate_draft(history, niche):
 
     # Only entries that have a URL (i.e. posts we've actually published since
     # URL-tracking was added) are usable as internal-link candidates.
-    linkable = [h for h in history if h.get("url")][-20:]
+    linkable = [h for h in history if h.get("url") and not post_out_of_season(h)][-20:]   # no out-of-season holiday posts
     linkable_json = json.dumps(
         [{"title": h["title"], "url": h["url"]} for h in linkable],
         ensure_ascii=False,
@@ -2927,17 +2969,7 @@ def main():
         # just because a category is new/thin). Still fully static (baked
         # into the HTML at publish time) — no extra JS/network request on
         # page load, so there's no page-speed trade-off.
-        related, seen_titles = [], set()
-
-        def add_related(candidates):
-            for h in candidates:
-                key = re.sub(r"\W+", " ", h.get("title", "").lower()).strip()
-                if h.get("url") and key and key not in seen_titles and len(related) < 3:
-                    seen_titles.add(key)
-                    related.append(h)
-
-        add_related(reversed([h for h in history if h.get("category") == category]))
-        add_related(reversed(history))   # fill the rest with the newest posts, never repeating a title
+        related = pick_related_posts(history, category)   # same category first, then newest; no out-of-season holiday posts
         related_posts_html = ""
         if related:
             items = "".join(
