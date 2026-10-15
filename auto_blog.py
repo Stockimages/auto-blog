@@ -210,10 +210,6 @@ FALLBACK_TEXT_MODEL_2 = os.environ.get("GEMINI_FALLBACK_MODEL_2", "gemini-3.6-fl
 FALLBACK_TEXT_MODEL_3 = os.environ.get("GEMINI_FALLBACK_MODEL_3", "gemini-3.5-flash")
 FALLBACK_TEXT_MODEL_4 = os.environ.get("GEMINI_FALLBACK_MODEL_4", "gemini-3.5-flash-lite")
 FALLBACK_TEXT_MODEL_5 = os.environ.get("GEMINI_FALLBACK_MODEL_5", "gemini-3.1-flash-lite")
-# Gemma 4 (open models served through the same Gemini API) — extra backups placed after
-# gemini-3.5-flash-lite and before gemini-3.1-flash-lite, following the quality ranking.
-GEMMA_MODEL_1 = os.environ.get("GEMMA_MODEL_1", "gemma-4-31b-it")
-GEMMA_MODEL_2 = os.environ.get("GEMMA_MODEL_2", "gemma-4-26b-a4b-it")
 
 HISTORY_FILE = "topics_history.json"
 MAX_TOPIC_ATTEMPTS = 4  # tries to get a non-duplicate topic before skipping the run
@@ -344,6 +340,11 @@ _TITLE_FILLER = {
     "stunning", "gorgeous", "ultimate", "complete", "essential",
     "designer", "fraction", "price", "cheap", "expensive", "less", "worth",
     "fix", "fixes", "them", "cluttered", "clutter", "space", "spaces", "before", "after",
+    # words of the newer formats (renter-friendly ideas, quick fixes, gifts, checklists, palettes, care guides...)
+    "renter", "renters", "friendly", "rental", "quick", "minute", "minutes", "gift", "gifts", "swap", "swaps",
+    "versus", "vs", "which", "checklist", "palette", "color", "colors", "colour", "colours", "care", "cleaning",
+    "clean", "refresh", "shopping", "list", "splurge", "save", "rules", "rule", "formula", "formulas", "tiny",
+    "small", "solutions", "solution", "thoughtful", "finds", "find", "ready", "plan", "better", "should", "need",
 }
 
 
@@ -433,6 +434,30 @@ _BRAND_RE = re.compile(
 )
 
 
+def find_repeated_text(html_text):
+    """
+    Returns a short snippet of the first sentence that is repeated (word for word, or with only a
+    couple of words changed) elsewhere in the article, else None. Only long sentences count (10+
+    words) and the match must be close (the two sentences share 30%+ of their 4-word runs), so
+    normal prose never triggers it. A fully reworded repeat can't be caught by code; the prompt
+    forbids that.
+    """
+    text = re.sub(r"</(?:p|li|h2|h3|td|th|tr|blockquote)>|<br\s*/?>", "\n", html_text or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    sentences = []
+    for block in text.split("\n"):
+        for sent in re.split(r"(?<=[.!?])\s+", block):
+            words = re.findall(r"[a-z0-9']+", sent.lower())
+            if len(words) >= 10:
+                sentences.append((sent.strip(), {tuple(words[i:i + 4]) for i in range(len(words) - 3)}))
+    for i in range(len(sentences)):
+        for j in range(i + 1, len(sentences)):
+            a, b = sentences[i][1], sentences[j][1]
+            if a and b and len(a & b) / len(a | b) >= 0.3:
+                return sentences[j][0][:70]
+    return None
+
+
 def find_quality_problems(draft, min_words=600):
     """
     Returns a list of reasons this draft shouldn't be published (empty list =
@@ -445,6 +470,9 @@ def find_quality_problems(draft, min_words=600):
     words = len(body_text.split())
     if words < min_words:
         problems.append(f"too short ({words} words, minimum {min_words})")
+    repeated = find_repeated_text(draft.get("html", ""))
+    if repeated:
+        problems.append(f"repeats itself, padding with repeated text (e.g. \"{repeated}...\")")
     for label, text in (("title", draft.get("title", "")), ("article", body_text)):
         m = _EXPERIENCE_CLAIMS.search(text)
         if m:
@@ -498,6 +526,17 @@ TITLE_STYLES = [
     "a from-to makeover title, e.g. \"From Thrift Store Colander to Zinc Planter: A $18 Makeover\"",
     "lead with the saving, e.g. \"A $20 Entryway Bench That Looks Like It Cost $400\"",
 ]
+TITLE_STYLES += [
+    "a beginner-friendly project title, e.g. \"An Easy Beginner Project: Painted Wooden Bead Garland\"",
+    "a time-led title, e.g. \"A Thrifted Frame Gallery Wall You Can Finish in One Afternoon\"",
+    "a skip-the-store title, e.g. \"Skip the Store: A Thrifted Crate Side Table for Under $15\"",
+    "a materials-led title, e.g. \"Wood, Rope and Paint: A Simple DIY Wall Shelf\"",
+    "a no-tools title, e.g. \"A No-Drill Thrifted Frame Gallery for Renters\"",
+    "a small-detail title, e.g. \"The Little Trick That Makes Plain Candle Holders Look Aged\"",
+    "a plain how-to title, e.g. \"How to Make a Rope Handle Basket Look Custom\"",
+    "a before-you-start title, e.g. \"What to Know Before You Paint a Thrifted Wooden Tray\"",
+    "a for-whom title, e.g. \"A Simple Nightstand Refresh for Small Bedrooms\"",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +585,55 @@ POST_FORMATS = [
      "title_hint": "a curious question or honest verdict, in your own words, for example 'Does Peel-and-Stick Backsplash Really Last? What Actually Happens Over Time' or 'Is Chalk Paint Worth It on Old Furniture?' or 'Do Thrifted Rugs Hold Up in a Busy Hallway?'. Never write the title in the first person (no 'I' or 'my')."},
 ]
 
+_PER_ITEM_RULE = ("Costs are PER {unit}: total_cost must be the range of the per-{unit} costs in your table, and any "
+                  "total you state in the text must equal that range, never a single total that contradicts the table.")
+POST_FORMATS += [
+    {"name": "renter-friendly ideas", "weight": 2, "use_title_styles": False,
+     "instruction": "A numbered list post of 5-8 ideas that need no drilling, no painting and nothing permanent, so a renter can undo every change and keep the deposit. Each idea gets its own h2/h3 with a concrete tip, a rough cost and how it comes off again. " + _PER_ITEM_RULE.format(unit="idea"),
+     "table_hint": "a summary table with columns Idea, Approx. cost, How to undo it",
+     "title_hint": "number-led and specific, in your own words, for example '6 Renter-Friendly Ways to Warm Up a Plain Living Room' or '5 No-Drill Ideas That Make a Rental Bathroom Feel Finished'"},
+    {"name": "quick fixes under an hour", "weight": 2, "use_title_styles": False,
+     "instruction": "A numbered list post of 5-8 quick improvements that each take 10-60 minutes, so a reader can finish one on a weeknight. Each gets its own h2/h3 with the exact steps in two or three sentences, the time and a rough cost. " + _PER_ITEM_RULE.format(unit="fix"),
+     "table_hint": "a summary table with columns Fix, Time, Approx. cost",
+     "title_hint": "number-led and specific, in your own words, for example '7 Fifteen-Minute Fixes That Make a Room Look Finished' or '6 Quick Entryway Upgrades You Can Do Tonight'"},
+    {"name": "diy gift ideas", "weight": 1, "use_title_styles": False,
+     "instruction": "A numbered list post of 5-8 handmade or thrift-flip gift ideas for a specific kind of person or occasion. Each gets its own h2/h3 with what to make, the supplies, a rough cost, the time and a simple way to wrap it. " + _PER_ITEM_RULE.format(unit="gift"),
+     "table_hint": "a summary table with columns Gift, Approx. cost, Time",
+     "title_hint": "number-led and specific, in your own words, for example '5 Thoughtful Gifts to Make From Thrift Store Finds' or '6 Simple Handmade Gifts for People Who Love Their Kitchen'"},
+    {"name": "this vs that", "weight": 1, "use_title_styles": False,
+     "instruction": "An honest side-by-side comparison of two budget options for the same job (for example paint vs peel-and-stick, or thrifted vs new baskets): cost, effort, look, durability and who should pick which. Base it on how the materials generally behave; never claim you tested them. End with a clear recommendation for each type of reader.",
+     "table_hint": "a comparison table with columns Factor, Option A, Option B, with the typical cost of each option in its own row",
+     "title_hint": "a clear comparison, in your own words, for example 'Paint or Peel-and-Stick: Which Is Better for a Rental Wall?' or 'Thrifted Baskets or New Ones: Which Is Worth the Money?'"},
+    {"name": "seasonal checklist", "weight": 1, "use_title_styles": False,
+     "instruction": "A practical checklist for getting ONE space ready for the season or an event, grouped into what to do first, next and last, with the time and a rough cost for each task. " + _PER_ITEM_RULE.format(unit="task"),
+     "table_hint": "a checklist table with columns Task, Time, Approx. cost",
+     "title_hint": "in your own words, for example 'A Simple Checklist for Getting Your Entryway Ready for Fall' or 'A Weekend Checklist to Make a Guest Room Feel Welcoming'"},
+    {"name": "color palette guide", "weight": 1, "use_title_styles": False,
+     "instruction": "How to choose and build a cohesive colour palette for one room on a budget: how many colours, the 60-30-10 idea, where each colour shows up in the room and a cheap way to add each one. Use generic colour names only. " + _PER_ITEM_RULE.format(unit="item"),
+     "table_hint": "a table with columns Role in the room, Colour idea, Budget way to add it, Approx. cost",
+     "title_hint": "in your own words, for example 'How to Build a Calm Neutral Palette for a Bedroom on a Budget' or 'Choosing Warm Colors for a Cozy Living Room Without Repainting'"},
+    {"name": "small space solutions", "weight": 2, "use_title_styles": False,
+     "instruction": "A problem-and-solution post for ONE kind of small space (tiny bathroom, studio, narrow hallway, small bedroom): 5-8 specific problems, each paired with an inexpensive solution and a rough cost. " + _PER_ITEM_RULE.format(unit="solution"),
+     "table_hint": "a table with columns Problem, Solution, Approx. cost",
+     "title_hint": "number-led and specific, in your own words, for example '7 Ways to Fit More Storage Into a Tiny Bathroom' or '6 Smart Fixes for a Narrow Hallway'"},
+    {"name": "care and cleaning guide", "weight": 1, "use_title_styles": False,
+     "instruction": "How to clean, refresh or safely repair one kind of second-hand item or material (wood, brass, glass, ceramic, wicker, textiles): what to test first, the gentle method, and what to avoid. Written from how materials generally behave; never claim you tried it. " + _PER_ITEM_RULE.format(unit="item"),
+     "table_hint": "a table with columns Item or material, Safe method, Supplies cost",
+     "title_hint": "practical and specific, in your own words, for example 'How to Clean and Refresh Thrifted Brass Without Ruining It' or 'Giving Old Wicker Baskets a Second Life: What Works'"},
+    {"name": "thrift shopping list", "weight": 2, "use_title_styles": False,
+     "instruction": "A curated shopping list for ONE room or look: what to hunt for on a thrift-store trip, a fair price range for each piece and what to check before buying it. " + _PER_ITEM_RULE.format(unit="item"),
+     "table_hint": "a table with columns Item to find, Fair price, What to check",
+     "title_hint": "in your own words, for example 'A Thrift Store Shopping List for a Cozy Reading Nook' or 'What to Hunt for When Thrifting a Warm Entryway'"},
+    {"name": "splurge or save", "weight": 1, "use_title_styles": False,
+     "instruction": "Where to spend a little more and where to save when decorating ONE room, piece by piece, with a clear reason for each choice. " + _PER_ITEM_RULE.format(unit="item"),
+     "table_hint": "a table with columns Item, Spend or save, Typical price",
+     "title_hint": "in your own words, for example 'Where to Splurge and Where to Save When Decorating a Living Room' or 'Spend or Save: A Practical Guide to Furnishing a Small Bedroom'"},
+    {"name": "decor rules", "weight": 1, "use_title_styles": False,
+     "instruction": "Simple designer rules of thumb (rule of three, odd numbers, 60-30-10, eye level, one big statement piece) applied to ONE spot, with a beginner-friendly example for each rule and what it costs to try. " + _PER_ITEM_RULE.format(unit="rule"),
+     "table_hint": "a table with columns Rule, How to apply it, Approx. cost to try",
+     "title_hint": "number-led and specific, in your own words, for example '5 Easy Decorating Rules That Make a Shelf Look Styled' or '4 Simple Rules for a Mantel That Looks Balanced'"},
+]
+
 # month -> (themes for right now, themes for roughly the next 4-6 weeks).
 # US audience; holidays are planned ahead on Pinterest, so "upcoming" matters.
 SEASONAL_THEMES = {
@@ -574,6 +662,24 @@ SEASONAL_THEMES = {
     12: (["Christmas decor: trees, mantels and tablescapes", "last-minute DIY gifts", "New Year's Eve party decor", "cozy winter home"],
          ["New Year home reset", "cozy winter warmth"]),
 }
+
+# extra non-holiday themes per month (no holiday names, so they never expire), for more variety
+_EXTRA_SEASONAL_THEMES = {
+    1: ["cozy winter reading nook", "winter entryway with boot storage", "bedroom refresh with warm layers"],
+    2: ["late-winter organization and reset", "cozy bathroom spa corner", "bright winter-to-spring windowsill"],
+    3: ["spring entryway refresh", "light and fresh bedroom for spring", "spring cleaning organization nooks"],
+    4: ["fresh kitchen refresh for spring", "balcony herb and flower planters", "bright spring bedroom"],
+    5: ["porch and patio planters", "light summer bedroom", "outdoor dining on a budget"],
+    6: ["small balcony and apartment patio", "summer kitchen and entertaining", "beach-inspired bathroom and bedroom"],
+    7: ["cool and airy summer bedroom", "summer porch lighting", "organized pantry and kitchen reset"],
+    8: ["first apartment kitchen basics", "entryway drop zone for back-to-school", "end-of-summer porch refresh"],
+    9: ["cozy fall bedroom", "fall kitchen and pantry", "warm fall entryway"],
+    10: ["cozy fall bathroom and guest room", "hosting-ready living room", "warm lighting and candles for dark evenings"],
+    11: ["hosting-ready guest room", "cozy bedroom for winter", "kitchen and dining table for gatherings"],
+    12: ["cozy winter bedroom and bath", "organized entryway for guests", "warm lighting for long evenings"],
+}
+for _m, _extra in _EXTRA_SEASONAL_THEMES.items():
+    SEASONAL_THEMES[_m] = (SEASONAL_THEMES[_m][0] + _extra, SEASONAL_THEMES[_m][1])
 
 # Holiday themes are dropped once their date is too close to still help
 # (Google indexes slowly and Pinterest users plan weeks ahead). (month, day)
@@ -646,16 +752,306 @@ STYLE_LENSES = [
     "french country", "coastal", "cottagecore", "grandmillennial / vintage maximalist",
     "industrial", "scandinavian", "rustic cabin", "eclectic",
 ]
+STYLE_LENSES += [
+    "transitional", "traditional / classic", "dark academia", "coastal grandmother", "organic modern", "retro 70s",
+    "english country", "maximalist", "desert modern / southwest", "minimalist", "art deco touches", "global / well-travelled",
+]
 
+
+# Specific, stock-photo-friendly subjects. The script hands ONE of them to Gemini for each post (the one
+# used least so far), so the model no longer has to invent a topic that is different from ~150 older posts.
+# (id, lowercase keywords that count as "already used" when found in an old title, how it is described)
+SUBJECT_POOL = [
+    ("mantel", ("mantel", "fireplace"), "a fireplace mantel"),
+    ("coffee-table", ("coffee table",), "a coffee table"),
+    ("bookshelf", ("bookshelf", "bookcase", "book shelf"), "a bookshelf or bookcase"),
+    ("console-table", ("console table", "sofa table"), "a console table behind a sofa"),
+    ("throw-pillows", ("pillow", "cushion"), "throw pillows and sofa cushions"),
+    ("floor-lamp", ("floor lamp",), "a floor lamp corner"),
+    ("side-table", ("side table", "end table"), "a side table next to a sofa or chair"),
+    ("blanket-basket", ("blanket",), "a basket of throw blankets"),
+    ("gallery-wall", ("gallery wall", "wall art"), "a gallery wall of frames"),
+    ("tv-stand", ("tv stand", "media console", "tv wall"), "a TV stand or media console"),
+    ("area-rug", ("area rug", "living room rug"), "an area rug"),
+    ("curtains", ("curtain", "drape"), "window curtains"),
+    ("window-sill", ("window sill", "windowsill"), "a window sill"),
+    ("pouf", ("pouf", "ottoman"), "an ottoman or pouf"),
+    ("accent-chair", ("accent chair", "armchair"), "an accent chair corner"),
+    ("reading-nook", ("reading nook",), "a reading nook"),
+    ("open-shelves", ("open shelf", "open shelves", "kitchen shelf"), "open kitchen shelves"),
+    ("kitchen-island", ("kitchen island",), "a kitchen island"),
+    ("spice-rack", ("spice",), "spice storage"),
+    ("cutting-boards", ("cutting board", "pastry board", "charcuterie"), "wooden cutting boards"),
+    ("utensil-crock", ("utensil",), "a utensil crock by the stove"),
+    ("fruit-bowl", ("fruit bowl", "fruit basket"), "a fruit bowl on the counter"),
+    ("herb-garden", ("herb",), "a kitchen window herb garden"),
+    ("pantry", ("pantry",), "pantry shelves and jars"),
+    ("cabinet-hardware", ("cabinet knob", "cabinet hardware", "cabinet pull", "cabinet door"), "cabinet knobs and handles"),
+    ("kitchen-cart", ("kitchen cart", "bar cart"), "a kitchen or bar cart"),
+    ("serving-tray", ("serving tray",), "a serving tray"),
+    ("mug-display", ("mug",), "a mug display"),
+    ("cake-stand", ("cake stand",), "a cake stand"),
+    ("dining-table", ("dining table", "centerpiece"), "a dining table centerpiece"),
+    ("table-setting", ("table runner", "placemat", "tablescape"), "a table setting with runner and placemats"),
+    ("vanity-tray", ("vanity",), "a bathroom vanity tray"),
+    ("towel-storage", ("towel",), "bathroom towel storage"),
+    ("shower-curtain", ("shower curtain",), "a shower curtain"),
+    ("bathroom-mirror", ("bathroom mirror",), "a bathroom mirror"),
+    ("soap-dispenser", ("soap",), "soap dispensers and bath accessories"),
+    ("bath-mat", ("bath mat",), "a bath mat"),
+    ("bathroom-shelf", ("over the toilet", "over-the-toilet", "bathroom shelf"), "a shelf above the toilet"),
+    ("bathroom-plant", ("bathroom plant",), "plants in a bathroom"),
+    ("bathroom-baskets", ("bathroom basket",), "bathroom storage baskets"),
+    ("headboard", ("headboard",), "a headboard"),
+    ("nightstand", ("nightstand", "bedside"), "a nightstand"),
+    ("bedding", ("bedding", "duvet", "comforter"), "layered bedding"),
+    ("dresser-top", ("dresser",), "a dresser top"),
+    ("above-bed", ("above the bed", "above bed"), "the wall above a bed"),
+    ("bed-bench", ("foot of the bed", "bed bench"), "a bench at the foot of the bed"),
+    ("jewelry-display", ("jewelry",), "a jewelry display"),
+    ("bedroom-curtains", ("blackout", "bedroom curtain"), "bedroom window treatments"),
+    ("closet", ("closet", "wardrobe"), "a closet or wardrobe"),
+    ("shoe-storage", ("shoe",), "shoe storage by the door"),
+    ("wall-hooks", ("hooks", "coat rack"), "wall hooks or a coat rack"),
+    ("key-tray", ("key tray", "mail", "key holder"), "a key tray and mail station"),
+    ("entry-mirror", ("entryway mirror", "entry mirror"), "a mirror by the front door"),
+    ("umbrella-stand", ("umbrella",), "an umbrella stand"),
+    ("entry-bench", ("entryway bench", "entry bench", "mudroom"), "an entryway bench or mudroom corner"),
+    ("doormat", ("doormat", "welcome mat"), "a doormat"),
+    ("porch-planters", ("porch planter", "planter"), "porch planters"),
+    ("string-lights", ("string light", "fairy light"), "outdoor string lights"),
+    ("outdoor-rug", ("outdoor rug",), "an outdoor rug"),
+    ("garden-pots", ("garden pot", "terracotta", "flower pot"), "garden pots and terracotta"),
+    ("bird-feeder", ("bird",), "a bird feeder or bird bath"),
+    ("house-numbers", ("house number", "mailbox"), "house numbers and a mailbox"),
+    ("door-wreath", ("wreath", "front door"), "a front door wreath"),
+    ("patio-table", ("patio table", "outdoor table"), "an outdoor table setting"),
+    ("outdoor-seating", ("outdoor cushion", "patio seating", "patio furniture"), "outdoor seating and cushions"),
+    ("window-boxes", ("window box",), "window boxes"),
+    ("lanterns", ("lantern",), "lanterns"),
+    ("garden-path", ("garden path", "stepping stone", "walkway"), "a garden path"),
+    ("fire-pit", ("fire pit",), "a fire pit seating area"),
+    ("room-divider", ("room divider",), "a room divider"),
+    ("floating-shelves", ("floating shelf", "floating shelves"), "floating shelves"),
+    ("over-door", ("over-the-door", "over the door"), "over-the-door storage"),
+    ("under-bed", ("under-bed", "under bed"), "under-bed storage"),
+    ("corner-shelf", ("corner shelf",), "a corner shelf"),
+    ("desk-nook", ("wall desk", "desk"), "a small desk nook"),
+    ("folding-table", ("folding table", "drop-leaf"), "a fold-down or drop-leaf table"),
+    ("candles", ("candle",), "candles and candle holders"),
+    ("vases", ("vase",), "vases with fresh or faux stems"),
+    ("baskets", ("basket",), "decorative baskets"),
+    ("wall-mirrors", ("round mirror", "wall mirror", "leaning mirror"), "a decorative wall mirror"),
+    ("picture-frames", ("picture frame", "photo frame"), "picture frames"),
+    ("faux-plants", ("faux plant", "fake plant", "houseplant", "succulent"), "faux plants or houseplants"),
+    ("wall-clock", ("clock",), "a wall clock"),
+    ("table-lamp", ("lampshade", "lamp shade", "table lamp"), "a table lamp and lampshade"),
+    ("wooden-crates", ("crate",), "wooden crates"),
+    ("glass-jars", ("jar", "apothecary"), "glass jars and apothecary jars"),
+    ("book-stacks", ("stack of books", "book stack"), "stacked books as decor"),
+    ("terrarium", ("terrarium", "cloche"), "a terrarium or glass cloche"),
+    ("decor-trays", ("decorative tray",), "decorative trays"),
+    ("picture-ledge", ("picture ledge",), "a picture ledge"),
+    ("woven-wall", ("macrame", "woven wall"), "woven or macrame wall hangings"),
+    ("dried-flowers", ("pampas", "dried flower", "dried stems"), "dried flowers and pampas grass"),
+]
+
+
+SUBJECT_POOL += [
+    ("fireplace-screen", ("fireplace screen", "firewood"), "a fireplace screen and firewood basket"),
+    ("wall-sconces", ("sconce",), "wall sconces"),
+    ("plant-stand", ("plant stand",), "a plant stand"),
+    ("sofa-styling", ("sofa styling", "styling a sofa", "couch"), "styling a sofa or couch"),
+    ("window-seat", ("bay window", "window seat"), "a window seat or bay window"),
+    ("built-in-shelves", ("built-in", "built in"), "built-in shelves"),
+    ("accent-wall", ("accent wall",), "an accent wall"),
+    ("wallpaper", ("peel-and-stick", "peel and stick", "wallpaper"), "peel-and-stick wallpaper"),
+    ("chandelier", ("chandelier", "pendant light", "light fixture"), "a chandelier or pendant light"),
+    ("layered-lighting", ("lighting layers", "layered lighting"), "layered lighting"),
+    ("rug-layering", ("rug layering", "layered rug"), "layered rugs"),
+    ("shelf-styling", ("shelfie", "shelf styling"), "a styled wall shelf"),
+    ("sideboard", ("sideboard", "buffet table"), "a sideboard or buffet"),
+    ("display-cabinet", ("china cabinet", "display cabinet"), "a display cabinet"),
+    ("dining-chairs", ("dining chair",), "dining chairs"),
+    ("home-bar", ("home bar", "bar area", "drink station"), "a home bar or drink station"),
+    ("coffee-station", ("coffee station", "coffee bar"), "a coffee station"),
+    ("breakfast-nook", ("breakfast nook",), "a breakfast nook"),
+    ("wine-storage", ("wine rack", "wine storage"), "a wine rack or wine storage"),
+    ("bread-box", ("bread box", "counter storage"), "a bread box and counter storage"),
+    ("pot-rack", ("pot rack", "pan rack", "hanging pot"), "a pot rack"),
+    ("dish-rack", ("dish rack", "dish drying"), "a dish drying area"),
+    ("sink-area", ("sink area", "kitchen sink", "dish soap"), "the area around the kitchen sink"),
+    ("backsplash", ("backsplash",), "a backsplash"),
+    ("kitchen-rug", ("kitchen rug", "runner rug"), "a kitchen rug or runner"),
+    ("kitchen-window", ("kitchen window",), "a kitchen window"),
+    ("countertop-styling", ("countertop",), "countertop styling"),
+    ("tea-station", ("tea station", "tea cart", "tea bar"), "a tea station or tea cart"),
+    ("laundry-nook", ("laundry",), "a laundry nook"),
+    ("hamper", ("hamper",), "a laundry hamper"),
+    ("linen-closet", ("linen closet", "linen shelf"), "a linen closet"),
+    ("blanket-ladder", ("towel ladder", "blanket ladder"), "a blanket or towel ladder"),
+    ("toilet-paper", ("toilet paper",), "toilet paper storage"),
+    ("bathroom-window", ("bathroom window",), "a bathroom window"),
+    ("bathroom-rug", ("bathroom rug",), "a bathroom rug"),
+    ("bath-tray", ("bathtub tray", "bath tray", "bathtub"), "a bathtub tray and bath setup"),
+    ("medicine-cabinet", ("medicine cabinet",), "a medicine cabinet"),
+    ("bathroom-lighting", ("vanity light", "bathroom light"), "bathroom lighting"),
+    ("powder-room", ("guest bathroom", "powder room"), "a powder room"),
+    ("bedside-lamp", ("bedside lamp",), "a bedside lamp"),
+    ("bed-canopy", ("canopy",), "a bed canopy"),
+    ("vanity-table", ("vanity table", "makeup station", "makeup"), "a vanity table or makeup station"),
+    ("nursery", ("nursery",), "a nursery corner"),
+    ("kids-room", ("kids room", "kid's room", "toy storage", "playroom"), "a kids room or toy storage"),
+    ("dorm-room", ("teen room", "dorm room", "dorm"), "a dorm or teen room"),
+    ("guest-room", ("guest room", "guest bedroom"), "a guest room"),
+    ("bedroom-wall", ("bedroom wall",), "a bedroom wall"),
+    ("bedroom-rug", ("bedroom rug",), "a bedroom rug"),
+    ("bedroom-storage", ("bedroom storage",), "bedroom storage"),
+    ("pillow-layering", ("pillow arrangement", "pillow layering"), "bed pillow arrangement"),
+    ("quilt-display", ("quilt",), "a quilt display"),
+    ("home-office", ("home office", "work from home"), "a home office corner"),
+    ("desk-setup", ("desk setup", "desk organization", "desk organizer"), "a desk setup"),
+    ("cord-hiding", ("cord", "cable"), "hiding cords and cables"),
+    ("pegboard", ("pegboard",), "a pegboard wall"),
+    ("cork-board", ("bulletin board", "cork board", "memo board"), "a cork board or memo board"),
+    ("command-center", ("calendar", "command center"), "a family command center"),
+    ("craft-storage", ("craft storage", "craft room"), "craft storage"),
+    ("closet-organizer", ("closet organizer", "closet organization"), "closet organization"),
+    ("mudroom-lockers", ("lockers", "cubbies"), "mudroom lockers or cubbies"),
+    ("hallway", ("hallway", "hall runner"), "a hallway runner or hallway wall"),
+    ("staircase", ("staircase", "stair wall", "stairs"), "a staircase wall"),
+    ("stair-landing", ("stair landing",), "a stair landing nook"),
+    ("foyer-table", ("foyer", "entry table", "entryway table"), "a foyer or entry table"),
+    ("coat-closet", ("coat closet",), "a coat closet"),
+    ("porch-swing", ("porch swing",), "a porch swing"),
+    ("balcony", ("balcony",), "a small balcony"),
+    ("patio-shade", ("patio umbrella", "umbrella shade"), "patio shade"),
+    ("garden-bench", ("garden bench",), "a garden bench"),
+    ("raised-beds", ("raised bed",), "raised garden beds"),
+    ("herb-planter", ("herb planter", "herb pot"), "an outdoor herb planter"),
+    ("hanging-baskets", ("hanging basket", "hanging planter"), "hanging baskets"),
+    ("curb-appeal", ("front yard", "curb appeal", "flower bed"), "curb appeal and flower beds"),
+    ("welcome-sign", ("welcome sign",), "a welcome sign"),
+    ("porch-chairs", ("porch chair", "rocking chair"), "porch chairs"),
+    ("solar-lighting", ("solar light", "path light", "landscape lighting"), "solar and path lighting"),
+    ("outdoor-dining", ("outdoor dining", "backyard dinner"), "an outdoor dining setup"),
+    ("tall-planters", ("patio pot", "tall planter"), "tall patio planters"),
+    ("trellis", ("trellis",), "a garden trellis"),
+    ("hammock", ("hammock",), "a hammock corner"),
+    ("garden-signs", ("garden sign", "garden marker"), "garden signs and markers"),
+    ("water-feature", ("fountain", "water feature"), "a small fountain or water feature"),
+    ("plant-hangers", ("macrame plant", "plant hanger"), "plant hangers"),
+    ("shells-coastal", ("seashell", "coastal accent"), "shells and coastal accents"),
+    ("stones-pebbles", ("river rock", "pebble"), "stones and pebbles as decor"),
+    ("wood-slices", ("wood slice", "log slice"), "wood slices"),
+    ("fabric-remnants", ("fabric",), "fabric remnants"),
+    ("thrifted-art", ("thrifted art", "oil painting", "canvas art"), "thrifted art"),
+    ("art-prints", ("art print", "framed print", "printable"), "art prints"),
+    ("mirror-collage", ("mirror gallery", "mirror collage"), "a mirror gallery"),
+    ("plate-wall", ("plate wall", "wall plates"), "a plate wall"),
+    ("shelf-brackets", ("bracket",), "shelf brackets"),
+    ("hardware-update", ("drawer pull", "knobs", "hardware"), "updating hardware"),
+    ("lamp-makeover", ("lamp makeover", "lamp base"), "a lamp makeover"),
+    ("candlesticks", ("candlestick", "taper"), "candlesticks and tapers"),
+    ("votives", ("votive", "tea light", "tealight"), "votives and tea lights"),
+    ("decor-bowls", ("decorative bowl", "wooden bowl"), "decorative bowls"),
+    ("decor-boxes", ("decorative box", "trinket", "keepsake"), "decorative boxes"),
+    ("vintage-books", ("book cover", "vintage books"), "vintage books as decor"),
+    ("pottery", ("pottery", "ceramic"), "pottery and ceramics"),
+    ("glass-bottles", ("glassware", "glass bottle"), "glass bottles and glassware"),
+    ("brass-copper", ("brass", "copper"), "brass and copper accents"),
+    ("flatware-decor", ("silverware", "flatware"), "silver and flatware as decor"),
+    ("table-linens", ("tablecloth", "napkin"), "linens and napkins"),
+    ("wall-baskets", ("wall basket",), "wall baskets"),
+    ("rope-jute", ("rope", "jute", "twine"), "rope and jute accents"),
+    ("reclaimed-wood", ("wood plank", "pallet", "reclaimed"), "reclaimed wood and pallets"),
+    ("chalkboard", ("chalkboard", "blackboard"), "a chalkboard"),
+    ("magazine-rack", ("magazine",), "a magazine rack"),
+    ("record-display", ("record player", "vinyl record"), "records and a record display"),
+    ("globe-map", ("globe", "world map", "vintage map"), "a globe or map display"),
+    ("ladder-shelf", ("ladder shelf", "ladder"), "a ladder shelf"),
+    ("wire-baskets", ("wire basket",), "wire baskets"),
+    ("interior-door", ("door hanging", "door decor", "interior door"), "an interior door"),
+    ("window-treatments", ("window film", "window treatment"), "window treatments"),
+    ("sheer-curtains", ("sheer",), "sheer curtains"),
+    ("shades-blinds", ("roman shade", "blinds"), "shades and blinds"),
+    ("floor-cushions", ("floor cushion",), "floor cushions"),
+    ("casual-seating", ("bean bag",), "casual seating"),
+    ("storage-bench", ("storage bench", "storage ottoman"), "a storage bench"),
+    ("hearth", ("hearth",), "a hearth"),
+    ("faux-fireplace", ("faux fireplace", "electric fireplace"), "a faux fireplace"),
+    ("shoe-bench", ("shoe bench",), "a shoe bench"),
+    ("party-backdrop", ("backdrop", "party decor"), "a party backdrop"),
+    ("gift-wrap-station", ("gift wrap", "wrapping station"), "a gift wrapping station"),
+    ("floral-centerpiece", ("floral centerpiece",), "a floral centerpiece"),
+    ("place-settings", ("place card", "place setting"), "place settings"),
+    ("buffet-station", ("buffet station", "hosting"), "a buffet or hosting setup"),
+    ("movie-corner", ("movie night", "media room"), "a movie night corner"),
+    ("game-corner", ("game night", "board game"), "a game night corner"),
+    ("music-corner", ("music corner", "guitar"), "a music corner"),
+    ("yoga-corner", ("yoga", "meditation"), "a yoga or meditation corner"),
+    ("pet-corner", ("pet corner", "pet bed", "dog bed", "cat shelf"), "a pet corner"),
+    ("plant-shelf", ("plant shelf",), "a plant shelf"),
+    ("sunroom", ("sunroom", "sun room"), "a sunroom"),
+    ("galley-kitchen", ("tiny kitchen", "galley kitchen"), "a tiny galley kitchen"),
+    ("studio-apartment", ("studio apartment",), "a studio apartment"),
+    ("first-apartment", ("first apartment",), "a first apartment"),
+    ("rental-space", ("rental",), "a rental space"),
+    ("narrow-room", ("narrow",), "a narrow room"),
+    ("basement", ("low ceiling", "basement"), "a basement or low-ceiling room"),
+    ("low-light-room", ("dark room", "low light", "north-facing"), "a dark or low-light room"),
+    ("open-concept", ("open plan", "open-concept", "open concept"), "an open-concept space"),
+    ("awkward-corner", ("corner nook", "awkward corner"), "an awkward corner"),
+    ("wall-niche", ("niche",), "a wall niche"),
+    ("ceiling-decor", ("ceiling",), "ceiling decor and lighting"),
+]
+
+
+def pick_subject(history, today=None):
+    """
+    Returns the (id, keywords, phrase) of the subject used least so far, preferring ones not touched in
+    the last 30 posts. A subject counts as used when a post saved it, or an old title contains one of its
+    keywords. Ties are broken at random.
+    """
+    def hit(h, sid, kws):
+        title = (h.get("title") or "").lower()
+        return h.get("subject") == sid or any(k in title for k in kws)
+
+    scored = []
+    for sid, kws, phrase in SUBJECT_POOL:
+        used = sum(1 for h in history if hit(h, sid, kws))
+        recent = any(hit(h, sid, kws) for h in history[-30:])
+        scored.append((used, recent, (sid, kws, phrase)))
+    best = min(u for u, _, _ in scored)
+    candidates = [x for u, r, x in scored if u == best and not r] or [x for u, r, x in scored if u == best]
+    return random.choice(candidates)
+
+
+
+# An optional "angle" (who it is for / what constraint it works within) mixed into ~60% of posts, never the
+# same one twice within 8 posts. No prices here, so it can't clash with the title and cost checks.
+ANGLES = [
+    "for renters, with nothing permanent", "for a first apartment", "for a very small space",
+    "for people who have never used tools", "for homes with kids and pets", "that takes under one hour",
+    "using finds from a single thrift-store trip", "with a dark, moody palette", "with a light and airy palette",
+    "using natural materials like wood, jute and linen", "with a vintage touch", "for hosting guests",
+    "for a room with little natural light", "for a long, narrow room", "with no sewing", "with no painting",
+    "with no drilling", "using things you may already own", "for a very tight budget", "for a cozy, layered look",
+    "for a clean, minimal look", "for a gift-worthy result", "for a quick weekend refresh",
+    "for people who hate clutter", "for a rental kitchen or bathroom", "for an open-concept space",
+    "for a cottage or farmhouse feel", "for a modern, simple look", "for a family-friendly home",
+    "for an evening glow with warm lighting",
+]
 
 def pick_post_plan(history, today=None):
     """
     Decides this post's format, seasonal theme and optional style lens.
-    Avoids repeating the last 3 formats and the last 8 themes.
+    Avoids repeating the last 10 formats, the last 8 themes and the last 8 angles.
     """
     today = today or datetime.now(timezone.utc)
 
-    recent_formats = {h.get("format") for h in history[-3:]}
+    n_avoid = min(10, max(len(POST_FORMATS) - 3, 1))   # with 20 formats the last 10 are skipped
+    recent_formats = {h.get("format") for h in history[-n_avoid:]}
     pool = [f for f in POST_FORMATS if f["name"] not in recent_formats] or POST_FORMATS
     fmt = random.choices(pool, weights=[f["weight"] for f in pool], k=1)[0]
 
@@ -688,7 +1084,16 @@ def pick_post_plan(history, today=None):
         f"STYLE LENS (optional flavor): lean into {style} style where it fits naturally; "
         f"don't force it." if style else ""
     )
-    return {"fmt": fmt, "theme": theme, "season_line": season_line, "style_line": style_line}
+    angle = None
+    if random.random() < 0.6:
+        recent_angles = {h.get("angle") for h in history[-8:]}
+        angle = random.choice([a for a in ANGLES if a not in recent_angles] or ANGLES)
+    angle_line = (
+        f"ANGLE (optional flavor): write it {angle}. Use it only where it fits the subject naturally; "
+        f"do not force it into the title." if angle else ""
+    )
+    return {"fmt": fmt, "theme": theme, "season_line": season_line, "style_line": style_line,
+            "angle": angle, "angle_line": angle_line}
 
 
 # Models that answered 429 (rate limit / quota) are skipped for the rest of the
@@ -696,7 +1101,7 @@ def pick_post_plan(history, today=None):
 _DEAD_MODELS = set()
 
 
-def generate_draft(history, niche):
+def generate_draft(history, niche, expand_from=None):
     # Duplicate-topic avoidance window: at ~2 posts/day, checking only the
     # last 50 titles covers ~25 days — past that, older topics could start
     # silently repeating since Gemini never sees them again. 300 covers
@@ -719,6 +1124,16 @@ def generate_draft(history, niche):
     title_style = random.choice(TITLE_STYLES)
     plan = pick_post_plan(history)
     fmt = plan["fmt"]
+    subject = None if expand_from else pick_subject(history)   # (id, keywords, phrase)
+    if subject:
+        subject_block = (
+            "SUBJECT FOR THIS POST (picked by the system so it cannot repeat an older post): " + subject[2] + ".\n"
+            "Make this the main object or spot of the article and work it into the format and the season/timing\n"
+            "instructions below. Do not switch to a different subject.\n\n"
+        )
+        subject_clause = " about that subject"
+    else:
+        subject_block, subject_clause = "", ""
     needs_line = (
         "   Right after the hook, add <h2>What You'll Need</h2> with a short <ul> of the\n"
         "   materials and tools, so readers can scan it before the steps.\n"
@@ -788,10 +1203,10 @@ CONSISTENCY RULES (readers notice contradictions, so check these before you answ
 - The materials list, the steps and the FAQ must agree on tools: never say that no power tools
   are needed if any step uses a drill or a saw.
 
-Topics already covered (do NOT repeat these or anything too similar to them):
+{subject_block}Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
 
-Pick ONE fresh, specific, practical angle on {niche} that is not in that list.
+Pick ONE fresh, specific, practical angle on {niche}{subject_clause} that is not in that list.
 Two posts about the same kind of main object or project (for example two about a
 thrifted wooden box, or two about candle holders) count as repeats even when the
 titles differ, so choose a clearly different object and project from every
@@ -808,6 +1223,7 @@ tutorials, so this post MUST follow this format): {fmt["name"].upper()}: {fmt["i
 
 {plan["season_line"]}
 {plan["style_line"]}
+{plan["angle_line"]}
 
 {title_line}
 
@@ -838,6 +1254,13 @@ WRITING VOICE — this is the most important instruction:
 LENGTH: 900-1300 words. Do not pad to hit a word count — if the honest,
 specific version of this article is 950 words, that's fine. Every sentence
 should earn its place.
+
+NO REPEATING TO REACH THE LENGTH: never restate something you already said. Do not end with a
+recap, a "step-by-step process" list or a "quick steps" summary that repeats the sections above,
+and do not say the same tip twice in different words. If the article is short of 900 words,
+add NEW, specific detail instead: exact measurements and quantities, what to buy and what to
+skip, a common mistake and how to fix it, a cheaper swap, a variation, or how to care for the
+finished piece.
 
 STRUCTURE (as HTML, using ONLY these tags: p, h2, h3, ul, ol, li, table, thead,
 tbody, tr, th, td, strong, blockquote, a):
@@ -980,9 +1403,15 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
     # gemini-3.8-flash / 3.7-flash are deliberately NOT in the article chain any more: on the free tier
     # they are almost always busy (503) or out of quota (429) and only cost time. To bring a model
     # back, put it in this list.
+    if expand_from:
+        prompt = build_expansion_prompt(expand_from)   # same chain, but the task is "make this draft longer"
+
+    # Only the two lite models are used: gemini-3.5-flash-lite, then gemini-3.1-flash-lite (the bigger Flash
+    # models no longer work on the free tier). Each is tried once; if both fail, the whole run is retried
+    # once after 15 minutes (see the bottom of this file).
     top_models = []
     lite_models = []
-    for m in [GEMMA_MODEL_1, FALLBACK_TEXT_MODEL_4, GEMMA_MODEL_2, FALLBACK_TEXT_MODEL_5]:   # Gemma 31B goes before the lite model that often writes too-short articles
+    for m in [FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5]:
         if m and m not in top_models and m not in lite_models:
             lite_models.append(m)
     # Every model is tried exactly once per article request: no second pass and no waiting in
@@ -990,9 +1419,9 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
     models_to_try = top_models + lite_models
 
     last_error = None
-    num_cycles = 1  # one pass through the whole model list — with 4 models to try, each
+    num_cycles = 1  # one pass through the whole model list — with 2 models to try, each
     # contributing its own separate quota, there's no need to loop back and re-try the exact
-    # same 4 models again; that would just burn quota with attempts already known to fail.
+    # same 2 models again; that would just burn quota with attempts already known to fail.
     cycle_wait = 0
 
     for cycle in range(1, num_cycles + 1):
@@ -1044,8 +1473,16 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                             parsed = parsed[0]   # a one-element list wrapping the article object
                         if not isinstance(parsed, dict):
                             raise json.JSONDecodeError("expected a JSON object", text, 0)   # handled like invalid JSON below
-                        parsed["_format"] = fmt["name"]
-                        parsed["_theme"] = plan["theme"]
+                        if expand_from:
+                            parsed["_format"] = expand_from.get("_format")
+                            parsed["_theme"] = expand_from.get("_theme")
+                            parsed["_subject"] = expand_from.get("_subject")
+                            parsed["_angle"] = expand_from.get("_angle")
+                        else:
+                            parsed["_format"] = fmt["name"]
+                            parsed["_theme"] = plan["theme"]
+                            parsed["_subject"] = subject[0] if subject else None
+                            parsed["_angle"] = plan["angle"]
                         parsed["_model"] = model
                         print(f"Article written by {model}.")
                         return parsed
@@ -1067,11 +1504,6 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
                 last_error = f"HTTP {res.status_code}: {res.text[:200]}"
 
                 if not transient:
-                    if model.startswith("gemma") and not is_final_attempt_ever:
-                        # an unavailable / unsupported Gemma model: skip it, keep going down the list
-                        print(f"[{model}] not usable ({res.status_code}: {res.text[:120]}), switching to fallback model...")
-                        _DEAD_MODELS.add(model)
-                        continue
                     raise RuntimeError(f"Gemini text generation failed ({res.status_code}): {res.text}")
 
                 if is_last_attempt_for_model and is_final_attempt_ever:
@@ -1717,14 +2149,18 @@ def fix_listicle_cost(draft):
         fmt_amt = lambda v: f"${v:g}"
 
         unit = {"listicle": "per idea", "mistakes and fixes": "per fix", "thrift buying guide": "",
-                "myth-busting": "per method"}.get(fmt)
+                "myth-busting": "per method", "renter-friendly ideas": "per idea", "quick fixes under an hour": "per fix",
+                "diy gift ideas": "per gift", "this vs that": "depending on the option", "seasonal checklist": "per task",
+                "color palette guide": "per item", "small space solutions": "per solution",
+                "care and cleaning guide": "per item", "thrift shopping list": "per item", "splurge or save": "per item",
+                "decor rules": "per rule"}.get(fmt)
         if unit is not None:
             amounts = [v for row in rows[1:] for cell in row for v in amount(cell)]
             if len(amounts) >= 2:
                 lo, hi = min(amounts), max(amounts)
                 suffix = f" {unit}" if unit else ""
                 draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)}{suffix}" if lo != hi else f"{fmt_amt(lo)}{suffix}")
-            if fmt == "listicle":
+            if fmt in ("listicle", "quick fixes under an hour", "diy gift ideas", "seasonal checklist"):
                 header = [c.lower() for c in rows[0]]
                 if any("time" in c for c in header):
                     ti = next(i for i, c in enumerate(header) if "time" in c)
@@ -2604,6 +3040,68 @@ def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False):
     return status
 
 
+def count_words(html_text):
+    return len(re.sub(r"<[^>]+>", " ", html_text or "").split())
+
+
+def build_expansion_prompt(draft, target_words=900):
+    """The task for a draft that is only slightly too short: make the SAME article longer with NEW detail."""
+    fields = {k: v for k, v in draft.items() if not str(k).startswith("_")}
+    words = count_words(draft.get("html", ""))
+    return (
+        f"You are editing a draft blog article that is too short: its html has about {words} words and it must have "
+        f"at least {target_words}.\n\n"
+        "Return the SAME article as one JSON object with EXACTLY the same fields, the same title and category, the same "
+        "faq, pin fields, image_prompt and section_images, but with a longer \"html\".\n\n"
+        "Rules:\n"
+        "- Keep every existing section, price and number unchanged, and keep every [[IMG_n]] placeholder exactly where it is.\n"
+        f"- Add about {max(target_words - words, 150)} NEW words inside at least 3 of the existing sections: exact "
+        "measurements and quantities, what to buy and what to skip, a common mistake and how to fix it, a cheaper swap, "
+        "a variation, or how to care for the finished piece.\n"
+        "- NEVER repeat or restate anything already in the article: no recap, no extra \"step-by-step\" list that repeats "
+        "the sections above, no same tip twice in different words.\n"
+        "- Keep the html structure (h2/h3/p/ul/ol/table). No brand or store names. No claims of personal experience "
+        "(never \"I tried\", \"in my home\"); speak to the reader.\n"
+        "- Output ONLY the JSON object, with every html attribute value in single quotes.\n\n"
+        "DRAFT:\n" + json.dumps(fields, ensure_ascii=False)
+    )
+
+
+def expand_short_draft(draft, niche, history, problems):
+    """
+    A draft whose ONLY problem is being too short (but not hopelessly: 250+ words) gets up to two
+    requests to write a longer version of the same article (the second pass starts from the first
+    pass's result if that grew but is still short), instead of being thrown away and a new topic
+    requested. Returns (draft, duplicate_of, problems): the expanded version once it passes every
+    check, otherwise the original untouched.
+    """
+    current = draft
+    for pass_no in (1, 2):
+        words = count_words(current.get("html", ""))
+        if words < 250:
+            break
+        print(f"Draft '{draft['title']}' is only {words} words - asking for a longer version of the same article "
+              f"(new detail, no repeats), pass {pass_no}/2...")
+        try:
+            expanded = normalize_draft(generate_draft(history, niche, expand_from=current))
+        except Exception as e:
+            print(f"Expansion skipped ({e}).")
+            break
+        new_problems = find_quality_problems(expanded)
+        duplicate_of = find_duplicate_title(expanded["title"], history)
+        new_words = count_words(expanded.get("html", ""))
+        if duplicate_of is None and not new_problems:
+            print(f"Expanded from {count_words(draft.get('html', ''))} to {new_words} words - accepted.")
+            return expanded, None, []
+        print(f"Expansion pass {pass_no} did not fix it ({new_words} words; "
+              f"{'; '.join(new_problems) or 'title became a duplicate'}).")
+        if duplicate_of is None and new_problems and all(p.startswith("too short") for p in new_problems) and new_words > words:
+            current = expanded   # it grew but is still short: one more pass from this version
+            continue
+        break
+    return draft, None, problems
+
+
 # Set to True the moment main() is about to call Blogger's publish API. Any failure BEFORE that
 # point means nothing went live anywhere, so the whole run can safely be retried once.
 _run_state = {"publish_started": False}
@@ -2630,17 +3128,19 @@ def main():
             draft = normalize_draft(generate_draft(prompt_history, niche))
             duplicate_of = find_duplicate_title(draft["title"], history)
             quality_problems = find_quality_problems(draft)
+            if duplicate_of is None and quality_problems and all(p.startswith("too short") for p in quality_problems):
+                draft, duplicate_of, quality_problems = expand_short_draft(draft, niche, history, quality_problems)
             if duplicate_of is None and not quality_problems:
                 if attempt >= MAX_TOPIC_ATTEMPTS or draft_has_hero_photo(draft, history):
                     break   # (the last attempt skips the photo gate: a post goes out rather than none)
                 print(f"Topic '{draft['title']}' rejected (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}): no suitable "
                       f"stock photo exists for it — asking for a more photographable topic.")
-                prompt_history = prompt_history + [{"title": draft["title"]}]
+                prompt_history = prompt_history + [{"title": draft["title"], "subject": draft.get("_subject")}]
                 continue
             if duplicate_of is not None:
                 print(f"Topic '{draft['title']}' is too similar to existing post "
                       f"'{duplicate_of}' (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}) — asking for a different one.")
-                prompt_history = prompt_history + [{"title": draft["title"]}]
+                prompt_history = prompt_history + [{"title": draft["title"], "subject": draft.get("_subject")}]
             else:
                 print(f"Draft '{draft['title']}' rejected (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}): "
                       f"{'; '.join(quality_problems)} — asking again.")
@@ -3073,6 +3573,8 @@ def main():
         "category": draft.get("category"),
         "format": draft.get("_format"),
         "theme": draft.get("_theme"),
+        "subject": draft.get("_subject"),
+        "angle": draft.get("_angle"),
         "date": datetime.now(timezone.utc).isoformat(),
         "url": post_url,
         "photo_ids": this_run_photo_ids,
