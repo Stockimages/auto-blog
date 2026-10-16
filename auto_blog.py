@@ -607,7 +607,7 @@ POST_FORMATS += [
     {"name": "seasonal checklist", "weight": 1, "use_title_styles": False,
      "instruction": "A practical checklist for getting ONE space ready for the season or an event, grouped into what to do first, next and last, with the time and a rough cost for each task. " + _PER_ITEM_RULE.format(unit="task"),
      "table_hint": "a checklist table with columns Task, Time, Approx. cost",
-     "title_hint": "in your own words, for example 'A Simple Checklist for Getting Your Entryway Ready for Fall' or 'A Weekend Checklist to Make a Guest Room Feel Welcoming'"},
+     "title_hint": "in your own words, for example 'A Simple Checklist for Getting Your Entryway Ready for Guests' or 'A Weekend Checklist to Make a Guest Room Feel Welcoming'"},
     {"name": "color palette guide", "weight": 1, "use_title_styles": False,
      "instruction": "How to choose and build a cohesive colour palette for one room on a budget: how many colours, the 60-30-10 idea, where each colour shows up in the room and a cheap way to add each one. Use generic colour names only. " + _PER_ITEM_RULE.format(unit="item"),
      "table_hint": "a table with columns Role in the room, Colour idea, Budget way to add it, Approx. cost",
@@ -1007,18 +1007,44 @@ SUBJECT_POOL += [
 ]
 
 
+# Months in which a weather-bound subject makes sense (US seasons; (10, 3) means October through March).
+# Subjects not listed here are usable all year.
+SUBJECT_SEASON = {
+    "porch-planters": (3, 10), "outdoor-rug": (4, 9), "garden-pots": (3, 9), "patio-table": (4, 9),
+    "outdoor-seating": (4, 9), "window-boxes": (3, 8), "garden-path": (4, 9), "fire-pit": (4, 11),
+    "porch-swing": (4, 9), "balcony": (4, 9), "patio-shade": (5, 9), "garden-bench": (4, 10),
+    "raised-beds": (3, 7), "herb-planter": (3, 8), "hanging-baskets": (4, 8), "curb-appeal": (3, 10),
+    "porch-chairs": (4, 10), "solar-lighting": (3, 10), "outdoor-dining": (4, 9), "tall-planters": (3, 9),
+    "trellis": (3, 8), "hammock": (5, 9), "garden-signs": (3, 8), "water-feature": (4, 9),
+    "fireplace-screen": (10, 3), "hearth": (10, 3), "faux-fireplace": (10, 3),
+    "blanket-basket": (9, 4), "blanket-ladder": (9, 4), "quilt-display": (9, 4),
+}
+
+
+def subject_in_season(subject_id, month):
+    window = SUBJECT_SEASON.get(subject_id)
+    if not window:
+        return True
+    lo, hi = window
+    return lo <= month <= hi if lo <= hi else (month >= lo or month <= hi)
+
+
+
 def pick_subject(history, today=None):
     """
-    Returns the (id, keywords, phrase) of the subject used least so far, preferring ones not touched in
-    the last 30 posts. A subject counts as used when a post saved it, or an old title contains one of its
+    Returns the (id, keywords, phrase) of the subject used least so far among those that fit the current
+    month, preferring ones not touched in the last 30 posts. A subject counts as used when a post saved it, or an old title contains one of its
     keywords. Ties are broken at random.
     """
     def hit(h, sid, kws):
         title = (h.get("title") or "").lower()
         return h.get("subject") == sid or any(k in title for k in kws)
 
+    month = (today or _utcnow()).month
     scored = []
     for sid, kws, phrase in SUBJECT_POOL:
+        if not subject_in_season(sid, month):
+            continue   # e.g. no hammock in December, no fireplace screen in July
         used = sum(1 for h in history if hit(h, sid, kws))
         recent = any(hit(h, sid, kws) for h in history[-30:])
         scored.append((used, recent, (sid, kws, phrase)))
@@ -2498,15 +2524,16 @@ def publish_post(access_token, title, html, labels, search_description=None):
 def _report_unsaved_secret(secret_name, secret_value, reason):
     """
     The repo (and so its Actions logs) is public, so a new secret value must NEVER be printed
-    there. When it could not be saved automatically, it is emailed to NOTIFY_EMAIL instead.
+    there. When it could not be saved automatically, it is put in the run's single final email
+    (to NOTIFY_EMAIL) instead.
     """
     print(f"{reason} The new {secret_name} value is NOT printed here because the logs are public.")
     if GMAIL_ADDRESS and GMAIL_APP_PASSWORD and NOTIFY_EMAIL:
-        send_phone_notification(
-            f"ACTION NEEDED: update GitHub secret {secret_name}",
-            f"{reason}\n\nSet the repository secret {secret_name} to this new value:\n\n{secret_value}\n",
+        queue_email_note(
+            f"ACTION NEEDED: update GitHub secret {secret_name}\n{reason}\n\n"
+            f"Set the repository secret {secret_name} to this new value:\n\n{secret_value}"
         )
-        print(f"Tried to email the new {secret_name} value to NOTIFY_EMAIL (see the result line above/below).")
+        print(f"The new {secret_name} value will be included in the final email of this run.")
     else:
         print(f"Email is not configured, so the new {secret_name} value could not be delivered; "
               f"it will have to be re-created manually.")
@@ -2879,10 +2906,9 @@ def warn_if_posts_unpublished(access_token, history):
         flagged = [p["title"] for p in res.json().get("items", []) if p.get("title") in auto_titles]
         if flagged:
             print("WARNING: auto-posts are in Draft (possibly unpublished by Blogger):", flagged)
-            send_phone_notification(
-                "⚠️ DecorVibe: post(s) unpublished?",
-                "These auto-published posts are now Drafts on Blogger (it may have unpublished "
-                "them for a guidelines issue). Check the Blogger Posts page for a notice, "
+            queue_email_note(
+                "⚠️ Post(s) unpublished? These auto-published posts are now Drafts on Blogger (it may have "
+                "unpublished them for a guidelines issue). Check the Blogger Posts page for a notice, "
                 "then delete or fix them and remove their Pinterest/Tumblr links:\n\n"
                 + "\n".join(f"- {t}" for t in flagged),
             )
@@ -3104,7 +3130,30 @@ def expand_short_draft(draft, niche, history, problems):
 
 # Set to True the moment main() is about to call Blogger's publish API. Any failure BEFORE that
 # point means nothing went live anywhere, so the whole run can safely be retried once.
-_run_state = {"publish_started": False}
+_run_state = {"publish_started": False, "retried": False, "emailed": False}
+
+# Extra things to tell the owner (a rotated secret that could not be saved, unpublished posts...). They are
+# NOT emailed on their own: the run sends exactly ONE email, at the very end, and these ride along in it.
+_EMAIL_NOTES = []
+
+
+def queue_email_note(text):
+    _EMAIL_NOTES.append(text)
+
+
+def send_final_email(subject, body):
+    """The single email of a run: success or final failure, plus any queued notes."""
+    if _EMAIL_NOTES:
+        body = body + "\n\n---\n" + "\n\n".join(_EMAIL_NOTES)
+    _run_state["emailed"] = True
+    send_phone_notification(subject, body)
+
+
+def _retry_pending():
+    """True when the run that just failed will be retried, so it must not send an email yet."""
+    if _run_state["publish_started"] or _run_state["retried"]:
+        return False
+    return int(os.environ.get("PREPUBLISH_RETRY_MINUTES", "15")) > 0
 
 
 def main():
@@ -3534,6 +3583,9 @@ def main():
         )
         social_description = extract_pin_description(draft["html"])
 
+        article_info = (f"{count_words(draft.get('html', ''))} words | model {draft.get('_model')} | "
+                        f"format {draft.get('_format')} | subject {draft.get('_subject')} | angle {draft.get('_angle') or 'none'}")
+        print(f"Final article: {article_info}")
         print("Publishing to Blogger...")
         access_token = get_access_token()
         _run_state["publish_started"] = True   # from here on a failure is NOT retried (could duplicate a post)
@@ -3553,10 +3605,13 @@ def main():
             git_commit_and_push([STATUS_FILE], "Auto post: run failed before publishing")
         except Exception as status_err:
             print(f"Could not save failure status: {status_err}")
-        send_phone_notification(
-            "❌ DecorVibe run FAILED",
-            f"The run failed before publishing anything.\n\nError: {e}",
-        )
+        if _retry_pending():
+            print("This failure will be retried, so no email is sent for it (one email is sent at the very end).")
+        else:
+            send_final_email(
+                "❌ DecorVibe run FAILED",
+                f"The run failed before publishing anything.\n\nError: {e}",
+            )
         raise
 
     print("Notifying Bing Submission API...")
@@ -3644,12 +3699,13 @@ description=extract_pin_description(
     def tick(ok):
         return "✅" if ok else "❌"
 
-    send_phone_notification(
+    send_final_email(
         f"{tick(True)} DecorVibe posted: {draft['title'][:60]}",
         f"{draft['title']}\n{post_url}\n\n"
         f"Blogger: {tick(True)}\n"
         f"Pinterest: {tick(pinterest_ok)}\n"
-        f"Tumblr: {tick(tumblr_ok)}",
+        f"Tumblr: {tick(tumblr_ok)}\n\n"
+        f"Article: {article_info}",
     )
 
     # Clean up what R2 only held for this run (Pinterest fetched its own copy of the
@@ -3658,7 +3714,7 @@ description=extract_pin_description(
     delete_from_r2(pin_cover_filepath)
 
 
-if __name__ == "__main__":
+def _run_with_retry():
     try:
         main()
     except Exception as e:
@@ -3666,15 +3722,23 @@ if __name__ == "__main__":
         # was published anywhere, so a retry can't create a duplicate post. Typical cause: Gemini
         # "high demand" (503) spells, which usually pass within minutes. A failure after the
         # publish call is never retried.
-        if _run_state["publish_started"]:
+        if not _retry_pending():
             raise
         wait_minutes = int(os.environ.get("PREPUBLISH_RETRY_MINUTES", "15"))
-        if wait_minutes <= 0:
-            raise
         print(f"No post was published ({e}). Waiting {wait_minutes} minutes, then trying once more...")
         time.sleep(wait_minutes * 60)
         # Models that already hit their quota (429) or are unavailable stay dead during the retry:
         # _DEAD_MODELS and _vision_state["dead"] are deliberately NOT cleared here.
         _vision_state.update(used=0, disabled=False, fails=0)
         _run_state["publish_started"] = False
+        _run_state["retried"] = True
         main()
+
+
+if __name__ == "__main__":
+    try:
+        _run_with_retry()
+    except Exception as e:
+        if not _run_state["emailed"]:   # e.g. a crash after publishing: still exactly one email
+            send_final_email("❌ DecorVibe run FAILED", f"The run did not finish cleanly.\n\nError: {e}")
+        raise
