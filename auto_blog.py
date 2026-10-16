@@ -340,11 +340,12 @@ _TITLE_FILLER = {
     "stunning", "gorgeous", "ultimate", "complete", "essential",
     "designer", "fraction", "price", "cheap", "expensive", "less", "worth",
     "fix", "fixes", "them", "cluttered", "clutter", "space", "spaces", "before", "after",
-    # words of the newer formats (renter-friendly ideas, quick fixes, gifts, checklists, palettes, care guides...)
-    "renter", "renters", "friendly", "rental", "quick", "minute", "minutes", "gift", "gifts", "swap", "swaps",
-    "versus", "vs", "which", "checklist", "palette", "color", "colors", "colour", "colours", "care", "cleaning",
-    "clean", "refresh", "shopping", "list", "splurge", "save", "rules", "rule", "formula", "formulas", "tiny",
-    "small", "solutions", "solution", "thoughtful", "finds", "find", "ready", "plan", "better", "should", "need",
+    # pure template words of the newer formats (renter-friendly ideas, quick fixes, checklists, palettes...).
+    # Topic words such as gift, refresh, plan, small, clean or care are deliberately NOT here: two posts
+    # about the same thing must still be recognised as duplicates.
+    "renter", "renters", "friendly", "quick", "minute", "minutes", "swap", "swaps", "versus", "vs", "which",
+    "checklist", "palette", "shopping", "list", "splurge", "save", "rules", "rule", "formula", "formulas",
+    "solutions", "solution",
 }
 
 
@@ -1050,7 +1051,9 @@ def subject_followed(draft):
     title = (draft.get("title") or "").lower()
     body = re.sub(r"<[^>]+>", " ", draft.get("html") or "").lower()
     words = [w for w in re.findall(r"[a-z]+", phrase.lower()) if len(w) >= 5 and w not in _GENERIC_SUBJECT_WORDS]
-    if any(k in title for k in list(kws) + words):
+    # the subject's keywords may sit inside longer words ("candle" in "candles"); the other words of its description must
+    # appear as whole words, so "entry" no longer counts when the title only says "entryway"
+    if any(k in title for k in kws) or any(re.search(rf"\b{re.escape(w)}(?:s|es)?\b", title) for w in words):
         return True
     return sum(body.count(k) for k in kws) >= 3
 
