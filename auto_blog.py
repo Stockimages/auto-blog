@@ -470,6 +470,9 @@ def find_quality_problems(draft, min_words=600):
     words = len(body_text.split())
     if words < min_words:
         problems.append(f"too short ({words} words, minimum {min_words})")
+    if not subject_followed(draft):
+        entry = next((e for e in SUBJECT_POOL if e[0] == draft.get("_subject")), None)
+        problems.append(f"ignored the assigned subject ({entry[2] if entry else draft.get('_subject')})")
     repeated = find_repeated_text(draft.get("html", ""))
     if repeated:
         problems.append(f"repeats itself, padding with repeated text (e.g. \"{repeated}...\")")
@@ -806,7 +809,7 @@ SUBJECT_POOL = [
     ("nightstand", ("nightstand", "bedside"), "a nightstand"),
     ("bedding", ("bedding", "duvet", "comforter"), "layered bedding"),
     ("dresser-top", ("dresser",), "a dresser top"),
-    ("above-bed", ("above the bed", "above bed"), "the wall above a bed"),
+    ("above-bed", ("above the bed", "above your bed", "above a bed", "above bed", "over the bed", "over your bed"), "the wall above a bed"),
     ("bed-bench", ("foot of the bed", "bed bench"), "a bench at the foot of the bed"),
     ("jewelry-display", ("jewelry",), "a jewelry display"),
     ("bedroom-curtains", ("blackout", "bedroom curtain"), "bedroom window treatments"),
@@ -1030,6 +1033,28 @@ def subject_in_season(subject_id, month):
 
 
 
+_GENERIC_SUBJECT_WORDS = {"above", "around", "setup", "accents", "corner", "fresh", "stems", "decor", "small",
+                          "space", "area", "storage", "display", "styling", "styled", "setting", "spots", "bedroom"}
+
+
+def subject_followed(draft):
+    """
+    Did the article stick to the subject the script assigned? Yes when the title uses one of the subject's words,
+    or the body names the subject's keywords at least 3 times. Drafts without an assigned subject always pass.
+    """
+    sid = draft.get("_subject")
+    entry = next((e for e in SUBJECT_POOL if e[0] == sid), None)
+    if not entry:
+        return True
+    _, kws, phrase = entry
+    title = (draft.get("title") or "").lower()
+    body = re.sub(r"<[^>]+>", " ", draft.get("html") or "").lower()
+    words = [w for w in re.findall(r"[a-z]+", phrase.lower()) if len(w) >= 5 and w not in _GENERIC_SUBJECT_WORDS]
+    if any(k in title for k in list(kws) + words):
+        return True
+    return sum(body.count(k) for k in kws) >= 3
+
+
 def pick_subject(history, today=None):
     """
     Returns the (id, keywords, phrase) of the subject used least so far among those that fit the current
@@ -1153,9 +1178,10 @@ def generate_draft(history, niche, expand_from=None):
     subject = None if expand_from else pick_subject(history)   # (id, keywords, phrase)
     if subject:
         subject_block = (
-            "SUBJECT FOR THIS POST (picked by the system so it cannot repeat an older post): " + subject[2] + ".\n"
-            "Make this the main object or spot of the article and work it into the format and the season/timing\n"
-            "instructions below. Do not switch to a different subject.\n\n"
+            "SUBJECT FOR THIS POST (fixed by the system so it cannot repeat an older post): " + subject[2] + ".\n"
+            "This overrides the season, style and angle lines: if they do not fit the subject, follow the subject and use\n"
+            "them only for small touches. The TITLE must name this subject (use its main words, for example \""
+            + subject[1][0] + "\"), and the WHOLE article must be about it, not about the room in general.\n\n"
         )
         subject_clause = " about that subject"
     else:
@@ -1277,13 +1303,15 @@ WRITING VOICE — this is the most important instruction:
 - No generic filler sentences that could apply to any home-decor post. Every
   paragraph must teach something specific or move the project forward.
 
-LENGTH: 900-1300 words. Do not pad to hit a word count — if the honest,
-specific version of this article is 950 words, that's fine. Every sentence
-should earn its place.
+LENGTH: 650-750 words in total (never more than 800). Readers skim, so a tight article beats a long
+one. Do not pad to hit a word count; every sentence should earn its place.
+
+PARAGRAPHS: keep every paragraph to 2-4 short sentences (about 60 words at most). Never write one long
+block of text; put lists of tips into <ul> or <ol> items instead.
 
 NO REPEATING TO REACH THE LENGTH: never restate something you already said. Do not end with a
 recap, a "step-by-step process" list or a "quick steps" summary that repeats the sections above,
-and do not say the same tip twice in different words. If the article is short of 900 words,
+and do not say the same tip twice in different words. If the article is short of 650 words,
 add NEW, specific detail instead: exact measurements and quantities, what to buy and what to
 skip, a common mistake and how to fix it, a cheaper swap, a variation, or how to care for the
 finished piece.
@@ -1429,6 +1457,8 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
     # gemini-3.8-flash / 3.7-flash are deliberately NOT in the article chain any more: on the free tier
     # they are almost always busy (503) or out of quota (429) and only cost time. To bring a model
     # back, put it in this list.
+    if subject:
+        prompt = subject_block + prompt   # the subject is also the very first thing the model reads
     if expand_from:
         prompt = build_expansion_prompt(expand_from)   # same chain, but the task is "make this draft longer"
 
@@ -1669,6 +1699,7 @@ _OFFTOPIC_WORDS = {
     "smartphone", "runway", "makeup", "wedding", "sports", "football", "soccer",
 }
 
+PHOTO_MIN_SCORE = 7              # Gemini rates the best candidate 0-10; below this it is rejected as not relevant
 VISION_CHECKS_PER_RUN = 36      # cap on Gemini photo-check calls per run (a video run makes ~15-20)
 _vision_state = {"used": 0, "disabled": False}
 
@@ -1749,8 +1780,11 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
             f"People in the photo are fine. REJECT only a photo where a person's FACE is clearly visible; a blurred or out-of-focus face, hands, arms, a back view or a body without a visible face are fine. "
             f"Also reject any photo with clearly readable words or lettering, and any photo "
             f"showing Christmas or Halloween decor unless the keywords ask for that holiday. "
+            f"Reject a photo of a different room or a different object than the subject, even if it looks nice. "
             f"If none of them genuinely fit, answer 0. "
-            f"Reply with ONLY JSON like {{\"best\": 2}}."
+            f"Also rate how well your chosen photo shows the subject from 0 to 10: 10 = the subject is clearly the focus "
+            f"of the photo, 7 = clearly visible but not the focus, 5 or less = a different object or room, or only loosely "
+            f"related. Reply with ONLY JSON like {{\"best\": 2, \"score\": 8}}, or {{\"best\": 0, \"score\": 0}}."
         )}]
         for i, p in enumerate(photos, start=1):
             thumb = robust_request("GET", p["src"].get("medium") or p["src"]["small"], timeout=30)
@@ -1796,6 +1830,10 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
                     continue
                 _vision_state["fails"] = 0
                 idx = int(m.group(1))
+                ms = re.search(r'"score"\s*:\s*(\d+(?:\.\d+)?)', text)
+                if idx and ms and float(ms.group(1)) < PHOTO_MIN_SCORE:
+                    print(f"Photo check: the best candidate scored {ms.group(1)}/10 for '{query}' — not relevant enough, rejected.")
+                    idx = 0
                 if idx == 0:
                     return False
                 if 1 <= idx <= len(photos):
@@ -2157,6 +2195,124 @@ def _fmt_minutes(v):
     return f"{v / 60:g} hour{'s' if v / 60 != 1 else ''}" if v >= 60 else f"{v:g} min"
 
 
+SUM_FORMATS = {"project tutorial", "room refresh plan", "project walkthrough with pitfalls", "styling guide"}
+_TOTAL_SENTENCE_RE = re.compile(
+    r"\b(all in|in total|altogether|overall|total|came (?:out )?to|comes? (?:out )?to|add(?:s|ed)? up|came in at|"
+    r"will cost|would cost|cost(?:s)? (?:between|about|around|roughly|just|only|under|a total)|"
+    r"runs? (?:about|around)|ran (?:about|around))\b", re.IGNORECASE)
+
+
+def _money(v):
+    return f"${v:.0f}" if abs(v - round(v)) < 1e-9 else f"${v:.2f}"
+
+
+def _price_rows(rows):
+    """[(label, lo, hi)] for every data row that shows a dollar amount; a Total row is ignored."""
+    out = []
+    for row in rows[1:]:
+        if not row or "total" in row[0].lower():
+            continue
+        amounts = [float(x) for cell in row[1:] for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", cell)]
+        if amounts:
+            out.append((row[0], min(amounts), max(amounts)))
+    return out
+
+
+def _set_total_row(html_text, total_text):
+    """Overwrites the price cell of the table's own Total row so it agrees with the rows above it."""
+    m = re.search(r"<table.*?</table>", html_text, re.DOTALL | re.IGNORECASE)
+    if not m:
+        return html_text
+    table = m.group(0)
+
+    def fix_row(tr_match):
+        tr = tr_match.group(0)
+        cells = re.findall(r"<t[dh][^>]*>.*?</t[dh]>", tr, re.DOTALL | re.IGNORECASE)
+        if not cells or "total" not in re.sub(r"<[^>]+>", " ", cells[0]).lower():
+            return tr
+
+        def fix_cell(c):
+            inner = c.group(2)
+            if "$" not in re.sub(r"<[^>]+>", " ", inner):
+                return c.group(0)
+            new_inner = f"<strong>{total_text}</strong>" if "<strong>" in inner.lower() else total_text
+            return f"{c.group(1)}{new_inner}{c.group(3)}"
+
+        first_end = tr.find(cells[0]) + len(cells[0])
+        return tr[:first_end] + re.sub(r"(<t[dh][^>]*>)(.*?)(</t[dh]>)", fix_cell, tr[first_end:], flags=re.DOTALL | re.IGNORECASE)
+
+    new_table = re.sub(r"<tr.*?</tr>", fix_row, table, flags=re.DOTALL | re.IGNORECASE)
+    return html_text.replace(table, new_table, 1)
+
+
+def _rewrite_closing_cost(html_text, new_sentence):
+    """
+    After the table, any sentence that states a total (the model's own arithmetic is what went wrong, again and
+    again) is replaced by `new_sentence`, which is built from the table. If the model wrote none, ours is added
+    right after the "Prices are estimates" line. Text before the table is left alone.
+    """
+    idx = html_text.rfind("</table>")
+    if idx == -1:
+        return html_text
+    head, tail = html_text[:idx + len("</table>")], html_text[idx + len("</table>"):]
+    state = {"done": False}
+
+    def fix_paragraph(m):
+        open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
+        if "<em>" in inner.lower() and "estimate" in inner.lower():
+            return m.group(0)
+        sentences = re.split(r"(?<=[.!?])\s+", inner.strip())
+        kept = [x for x in sentences if not (_TOTAL_SENTENCE_RE.search(x) and "$" in x)]
+        if len(kept) == len(sentences):
+            return m.group(0)
+        if not state["done"]:
+            state["done"] = True
+            kept.insert(0, new_sentence)
+        return f"{open_tag}{' '.join(kept)}{close_tag}" if kept else ""
+
+    tail = re.sub(r"(<p\b[^>]*>)(.*?)(</p>)", fix_paragraph, tail, flags=re.DOTALL)
+    if not state["done"]:
+        m = re.match(r"\s*<p>\s*<em>[^<]*estimate[^<]*</em>\s*</p>", tail, re.IGNORECASE)
+        pos = m.end() if m else 0
+        tail = tail[:pos] + f"<p>{new_sentence}</p>" + tail[pos:]
+    return head + tail
+
+
+def split_long_paragraphs(html_text, max_words=60):
+    """Breaks any <p> of more than ~75 words into shorter paragraphs at sentence ends (words unchanged)."""
+    abbrev = ("e.g.", "i.e.", "vs.", "approx.", "etc.", "oz.", "ft.", "no.")
+
+    def balanced(chunk):
+        return all(len(re.findall(rf"<{t}[\s>]", chunk)) == len(re.findall(rf"</{t}>", chunk))
+                   for t in ("a", "strong", "em", "b", "i"))
+
+    def fix(m):
+        open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
+        if len(re.sub(r"<[^>]+>", " ", inner).split()) <= max_words + 15:
+            return m.group(0)
+        sentences = []
+        for piece in re.split(r"(?<=[.!?])\s+", inner.strip()):
+            if sentences and sentences[-1].lower().endswith(abbrev):   # "e.g." is not a sentence end
+                sentences[-1] += " " + piece
+            else:
+                sentences.append(piece)
+        chunks, cur, cur_words = [], [], 0
+        for sent in sentences:
+            w = len(re.sub(r"<[^>]+>", " ", sent).split())
+            if cur and cur_words + w > max_words:
+                chunks.append(" ".join(cur))
+                cur, cur_words = [], 0
+            cur.append(sent)
+            cur_words += w
+        if cur:
+            chunks.append(" ".join(cur))
+        if len(chunks) < 2 or not all(balanced(c) for c in chunks):
+            return m.group(0)   # nothing to split, or a link/bold tag would be cut in half
+        return "".join(f"{open_tag}{c}{close_tag}" for c in chunks)
+
+    return re.sub(r"(<p\b[^>]*>)(.*?)(</p>)", fix, html_text or "", flags=re.DOTALL)
+
+
 def fix_listicle_cost(draft):
     """
     The Quick Take box must agree with the article's own table:
@@ -2186,6 +2342,12 @@ def fix_listicle_cost(draft):
                 lo, hi = min(amounts), max(amounts)
                 suffix = f" {unit}" if unit else ""
                 draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)}{suffix}" if lo != hi else f"{fmt_amt(lo)}{suffix}")
+                if unit.startswith("per "):   # the closing "total" sentence is rebuilt from the table too
+                    noun = unit[4:]
+                    draft["html"] = _rewrite_closing_cost(
+                        draft["html"],
+                        (f"Each {noun} costs between {_money(lo)} and {_money(hi)}, so you can pick the ones that fit your budget."
+                         if lo != hi else f"Each {noun} costs about {_money(lo)}."))
             if fmt in ("listicle", "quick fixes under an hour", "diy gift ideas", "seasonal checklist"):
                 header = [c.lower() for c in rows[0]]
                 if any("time" in c for c in header):
@@ -2198,6 +2360,17 @@ def fix_listicle_cost(draft):
                         else:
                             draft["time_estimate"] = (f"{_fmt_minutes(lo)} to {_fmt_minutes(hi)} {unit}" if lo != hi
                                                       else f"{_fmt_minutes(lo)} {unit}")
+        elif fmt in SUM_FORMATS:
+            priced = _price_rows(rows)
+            if len(priced) >= 2:
+                lo, hi = sum(r[1] for r in priced), sum(r[2] for r in priced)
+                total_text = _money(lo) if abs(lo - hi) < 1e-9 else f"{_money(lo)}-{_money(hi)}"
+                draft["total_cost"] = total_text
+                draft["html"] = _set_total_row(draft["html"], total_text)
+                draft["html"] = _rewrite_closing_cost(
+                    draft["html"],
+                    (f"All in, everything in the table comes to about {_money(lo)}." if abs(lo - hi) < 1e-9
+                     else f"All in, everything in the table comes to between {_money(lo)} and {_money(hi)}."))
         elif fmt == "designer look for less":
             lows, highs = [], []
             for row in rows[1:]:
@@ -2219,6 +2392,12 @@ def fix_listicle_cost(draft):
                         lambda m: f"{m.group(1)} {new_words}", draft["html"])
     except Exception as e:
         print(f"Cost/time fix skipped ({e}).")
+
+
+def finalize_draft_text(draft):
+    """Everything that must be true of the text no matter what the model wrote: totals from the table, short paragraphs."""
+    fix_listicle_cost(draft)
+    draft["html"] = split_long_paragraphs(draft.get("html", ""))
 
 
 def draft_has_hero_photo(draft, history):
@@ -3070,20 +3249,21 @@ def count_words(html_text):
     return len(re.sub(r"<[^>]+>", " ", html_text or "").split())
 
 
-def build_expansion_prompt(draft, target_words=900):
+def build_expansion_prompt(draft, target_words=700):
     """The task for a draft that is only slightly too short: make the SAME article longer with NEW detail."""
     fields = {k: v for k, v in draft.items() if not str(k).startswith("_")}
     words = count_words(draft.get("html", ""))
     return (
-        f"You are editing a draft blog article that is too short: its html has about {words} words and it must have "
-        f"at least {target_words}.\n\n"
+        f"You are editing a draft blog article that is too short: its html has about {words} words. Bring it to "
+        f"about {target_words} words (at least 650, never more than {target_words + 80}).\n\n"
         "Return the SAME article as one JSON object with EXACTLY the same fields, the same title and category, the same "
         "faq, pin fields, image_prompt and section_images, but with a longer \"html\".\n\n"
         "Rules:\n"
         "- Keep every existing section, price and number unchanged, and keep every [[IMG_n]] placeholder exactly where it is.\n"
-        f"- Add about {max(target_words - words, 150)} NEW words inside at least 3 of the existing sections: exact "
+        f"- Add about {max(target_words - words, 120)} NEW words inside at least 3 of the existing sections: exact "
         "measurements and quantities, what to buy and what to skip, a common mistake and how to fix it, a cheaper swap, "
-        "a variation, or how to care for the finished piece.\n"
+        "a variation, or how to care for the finished piece. Put the new detail into SHORT paragraphs (2-4 sentences, "
+        "about 60 words at most) or list items, never into one long block.\n"
         "- NEVER repeat or restate anything already in the article: no recap, no extra \"step-by-step\" list that repeats "
         "the sections above, no same tip twice in different words.\n"
         "- Keep the html structure (h2/h3/p/ul/ol/table). No brand or store names. No claims of personal experience "
@@ -3110,6 +3290,7 @@ def expand_short_draft(draft, niche, history, problems):
               f"(new detail, no repeats), pass {pass_no}/2...")
         try:
             expanded = normalize_draft(generate_draft(history, niche, expand_from=current))
+            finalize_draft_text(expanded)
         except Exception as e:
             print(f"Expansion skipped ({e}).")
             break
@@ -3175,6 +3356,7 @@ def main():
         prompt_history = list(history)
         for attempt in range(1, MAX_TOPIC_ATTEMPTS + 1):
             draft = normalize_draft(generate_draft(prompt_history, niche))
+            finalize_draft_text(draft)
             duplicate_of = find_duplicate_title(draft["title"], history)
             quality_problems = find_quality_problems(draft)
             if duplicate_of is None and quality_problems and all(p.startswith("too short") for p in quality_problems):
@@ -3193,13 +3375,16 @@ def main():
             else:
                 print(f"Draft '{draft['title']}' rejected (attempt {attempt}/{MAX_TOPIC_ATTEMPTS}): "
                       f"{'; '.join(quality_problems)} — asking again.")
+                if any(q.startswith("ignored the assigned subject") for q in quality_problems):
+                    # count that subject as used so the next attempt is given a different one
+                    prompt_history = prompt_history + [{"title": draft["title"], "subject": draft.get("_subject")}]
         else:
             raise RuntimeError(
                 f"Could not get an acceptable draft after {MAX_TOPIC_ATTEMPTS} attempts "
                 f"(last: '{draft['title']}' — {duplicate_of and 'duplicate topic' or '; '.join(quality_problems)}). "
                 f"Nothing was published this run."
             )
-        fix_listicle_cost(draft)
+        finalize_draft_text(draft)
         print("Topic chosen:", draft["title"])
 
         category = draft["category"]
