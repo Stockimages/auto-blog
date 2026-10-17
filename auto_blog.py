@@ -1268,6 +1268,13 @@ CONSISTENCY RULES (readers notice contradictions, so check these before you answ
   against the stock length before you write it; list the right stock size instead.
 - The materials list, the steps and the FAQ must agree on tools: never say that no power tools
   are needed if any step uses a drill or a saw.
+- The FAQ answers must agree with the article: the same products and the same methods (if the article seals
+  wood with mineral oil, the FAQ must not recommend a different sealer).
+
+SAFETY: never suggest mixing cleaning chemicals (for example bleach with vinegar or ammonia). If a step uses
+oil-soaked rags (linseed or tung oil), spray paint, solvents or heat, add one short safety line (ventilate the
+room; lay oily rags flat to dry, or soak them in water, before throwing them away). Never claim that a paint
+or finish is food-safe.
 
 {subject_block}Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
@@ -1714,7 +1721,7 @@ _OFFTOPIC_WORDS = {
 }
 
 VISION_MIN_GAP = 6.0           # seconds between photo-check requests (~10 per minute) so a burst cannot trip the free per-minute limit
-PHOTO_MIN_SCORE = 7              # Gemini rates the best candidate 0-10; below this it is rejected as not relevant
+PHOTO_MIN_SCORE = 8              # Gemini rates the best candidate 0-10; below this it is rejected as not relevant
 VISION_CHECKS_PER_RUN = 36      # cap on Gemini photo-check calls per run (a video run makes ~15-20)
 _vision_state = {"used": 0, "disabled": False}
 
@@ -1823,9 +1830,9 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
             f"showing Christmas or Halloween decor unless the keywords ask for that holiday. "
             f"Reject a photo of a different room or a different object than the subject, even if it looks nice. "
             f"If none of them genuinely fit, answer 0. "
-            f"Also rate how well your chosen photo shows the subject from 0 to 10: 10 = the subject is clearly the focus "
-            f"of the photo, 7 = clearly visible but not the focus, 5 or less = a different object or room, or only loosely "
-            f"related. Reply with ONLY JSON like {{\"best\": 2, \"score\": 8}}, or {{\"best\": 0, \"score\": 0}}."
+            f"Also rate how well your chosen photo shows the subject from 0 to 10: 8-10 = the subject is clearly the focus "
+            f"of the photo, 6-7 = visible but not the focus (a general room view), 5 or less = a different object or room, "
+            f"or only loosely related. Reply with ONLY JSON like {{\"best\": 2, \"score\": 8}}, or {{\"best\": 0, \"score\": 0}}."
         )}]
         for i, p in enumerate(photos, start=1):
             thumb = robust_request("GET", p["src"].get("medium") or p["src"]["small"], timeout=30)
@@ -1836,8 +1843,7 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
                                           "data": base64.b64encode(thumb.content).decode()}})
         _vision_state["used"] += 1
 
-        models = [m for m in (os.environ.get("GEMINI_VISION_MODEL"), FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5,
-                              FALLBACK_TEXT_MODEL_3, FALLBACK_TEXT_MODEL_2) if m]
+        models = [m for m in (os.environ.get("GEMINI_VISION_MODEL"), FALLBACK_TEXT_MODEL_4, FALLBACK_TEXT_MODEL_5) if m]
         models = list(dict.fromkeys(models))
         dead = _vision_state.setdefault("dead", set())   # models out of quota (429) for this run
         for attempt_round in range(2):
@@ -2967,25 +2973,33 @@ def extract_pin_description(html, hashtags="", max_length=500, cta="", override=
     return text + suffix
 
 
+def _post_pin(access_token, payload):
+    """Creates the pin. Pinterest sometimes answers 400 / code 2787 ("something went wrong on our end"): try once more."""
+    def send():
+        return robust_request(
+            "POST", "https://api.pinterest.com/v5/pins",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json=payload, timeout=60,
+        )
+    res = send()
+    if not res.ok and res.status_code == 400 and "2787" in res.text:
+        print("Pinterest said 'something went wrong on our end' (2787) - trying once more in 20s...")
+        time.sleep(20)
+        res = send()
+    return res
+
+
 def create_pinterest_pin(access_token, board_id, title, description, link, image_url):
-    res = robust_request(
-        "POST", "https://api.pinterest.com/v5/pins",
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
+    res = _post_pin(access_token, {
+        "board_id": board_id,
+        "title": title[:100],
+        "description": description[:500],
+        "link": link,
+        "media_source": {
+            "source_type": "image_url",
+            "url": image_url,
         },
-        json={
-            "board_id": board_id,
-            "title": title[:100],
-            "description": description[:500],
-            "link": link,
-            "media_source": {
-                "source_type": "image_url",
-                "url": image_url,
-            },
-        },
-        timeout=60,
-    )
+    })
     if not res.ok:
         raise RuntimeError(f"Pinterest pin creation failed ({res.status_code}): {res.text}")
     return res.json()
@@ -3038,22 +3052,17 @@ def create_pinterest_video_pin(access_token, board_id, title, description, link,
     else:
         raise RuntimeError("Pinterest video never finished processing in time.")
 
-    pin_res = robust_request(
-        "POST", "https://api.pinterest.com/v5/pins",
-        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-        json={
-            "board_id": board_id,
-            "title": title[:100],
-            "description": description[:500],
-            "link": link,
-            "media_source": {
-                "source_type": "video_id",
-                "cover_image_url": cover_image_url,
-                "media_id": media_id,
-            },
+    pin_res = _post_pin(access_token, {
+        "board_id": board_id,
+        "title": title[:100],
+        "description": description[:500],
+        "link": link,
+        "media_source": {
+            "source_type": "video_id",
+            "cover_image_url": cover_image_url,
+            "media_id": media_id,
         },
-        timeout=60,
-    )
+    })
     if not pin_res.ok:
         raise RuntimeError(f"Pinterest video pin creation failed ({pin_res.status_code}): {pin_res.text}")
     return pin_res.json()
