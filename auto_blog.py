@@ -802,7 +802,7 @@ SUBJECT_POOL = [
     ("shower-curtain", ("shower curtain",), "a shower curtain"),
     ("bathroom-mirror", ("bathroom mirror",), "a bathroom mirror"),
     ("soap-dispenser", ("soap",), "soap dispensers and bath accessories"),
-    ("bath-mat", ("bath mat",), "a bath mat"),
+    ("bath-mat", ("bath mat", "bathmat", "bath rug"), "a bath mat"),
     ("bathroom-shelf", ("over the toilet", "over-the-toilet", "bathroom shelf"), "a shelf above the toilet"),
     ("bathroom-plant", ("bathroom plant",), "plants in a bathroom"),
     ("bathroom-baskets", ("bathroom basket",), "bathroom storage baskets"),
@@ -924,7 +924,7 @@ SUBJECT_POOL += [
     ("mudroom-lockers", ("lockers", "cubbies"), "mudroom lockers or cubbies"),
     ("hallway", ("hallway", "hall runner"), "a hallway runner or hallway wall"),
     ("staircase", ("staircase", "stair wall", "stairs"), "a staircase wall"),
-    ("stair-landing", ("stair landing",), "a stair landing nook"),
+    ("stair-landing", ("stair landing", "landing nook", "landing piece", "the landing"), "a stair landing nook"),
     ("foyer-table", ("foyer", "entry table", "entryway table"), "a foyer or entry table"),
     ("coat-closet", ("coat closet",), "a coat closet"),
     ("porch-swing", ("porch swing",), "a porch swing"),
@@ -1038,10 +1038,17 @@ _GENERIC_SUBJECT_WORDS = {"above", "around", "setup", "accents", "corner", "fres
                           "space", "area", "storage", "display", "styling", "styled", "setting", "spots", "bedroom"}
 
 
+LIST_FORMATS = {"listicle", "quick fixes under an hour", "renter-friendly ideas", "small space solutions", "seasonal checklist",
+                "diy gift ideas", "thrift shopping list", "splurge or save", "decor rules", "mistakes and fixes"}
+
+
 def subject_followed(draft):
     """
-    Did the article stick to the subject the script assigned? Yes when the title uses one of the subject's words,
-    or the body names the subject's keywords at least 3 times. Drafts without an assigned subject always pass.
+    Did the article really stay on the assigned subject? The subject's words are counted in the body.
+    - List posts ("7 quick fixes", "5 ideas"...) must be about the subject in every item, so the body has to name
+      it about once per 150 words (at least 4 times).
+    - Other posts pass when the body names it at least 3 times, or when the title names it and the body at least twice.
+    Drafts without an assigned subject always pass.
     """
     sid = draft.get("_subject")
     entry = next((e for e in SUBJECT_POOL if e[0] == sid), None)
@@ -1051,11 +1058,12 @@ def subject_followed(draft):
     title = (draft.get("title") or "").lower()
     body = re.sub(r"<[^>]+>", " ", draft.get("html") or "").lower()
     words = [w for w in re.findall(r"[a-z]+", phrase.lower()) if len(w) >= 5 and w not in _GENERIC_SUBJECT_WORDS]
-    # the subject's keywords may sit inside longer words ("candle" in "candles"); the other words of its description must
-    # appear as whole words, so "entry" no longer counts when the title only says "entryway"
-    if any(k in title for k in kws) or any(re.search(rf"\b{re.escape(w)}(?:s|es)?\b", title) for w in words):
-        return True
-    return sum(body.count(k) for k in kws) >= 3
+    count = max(sum(body.count(k) for k in kws),
+                sum(len(re.findall(rf"\b{re.escape(w)}(?:s|es)?\b", body)) for w in words))
+    if draft.get("_format") in LIST_FORMATS:
+        return count >= max(4, round(len(body.split()) / 150))
+    title_has = any(k in title for k in kws) or any(re.search(rf"\b{re.escape(w)}(?:s|es)?\b", title) for w in words)
+    return count >= 3 or (title_has and count >= 2)
 
 
 def pick_subject(history, today=None):
@@ -1184,7 +1192,10 @@ def generate_draft(history, niche, expand_from=None):
             "SUBJECT FOR THIS POST (fixed by the system so it cannot repeat an older post): " + subject[2] + ".\n"
             "This overrides the season, style and angle lines: if they do not fit the subject, follow the subject and use\n"
             "them only for small touches. The TITLE must name this subject (use its main words, for example \""
-            + subject[1][0] + "\"), and the WHOLE article must be about it, not about the room in general.\n\n"
+            + subject[1][0] + "\"), and the WHOLE article must be about it, not about the room in general.\n"
+            + ("This is a list post: EVERY item must be a different idea about this subject itself (ways to style, make, fix or use it), "
+               "never unrelated ideas for the rest of the room. Name the subject in most items.\n" if fmt["name"] in LIST_FORMATS else "")
+            + "\n"
         )
         subject_clause = " about that subject"
     else:
@@ -1306,7 +1317,7 @@ WRITING VOICE — this is the most important instruction:
 - No generic filler sentences that could apply to any home-decor post. Every
   paragraph must teach something specific or move the project forward.
 
-LENGTH: 650-750 words in total (never more than 800). Readers skim, so a tight article beats a long
+LENGTH: 600-700 words in total (never more than 750). Readers skim, so a tight article beats a long
 one. Do not pad to hit a word count; every sentence should earn its place.
 
 PARAGRAPHS: keep every paragraph to 2-4 short sentences (about 60 words at most). Never write one long
@@ -1314,7 +1325,7 @@ block of text; put lists of tips into <ul> or <ol> items instead.
 
 NO REPEATING TO REACH THE LENGTH: never restate something you already said. Do not end with a
 recap, a "step-by-step process" list or a "quick steps" summary that repeats the sections above,
-and do not say the same tip twice in different words. If the article is short of 650 words,
+and do not say the same tip twice in different words. If the article is short of 600 words,
 add NEW, specific detail instead: exact measurements and quantities, what to buy and what to
 skip, a common mistake and how to fix it, a cheaper swap, a variation, or how to care for the
 finished piece.
@@ -1702,6 +1713,7 @@ _OFFTOPIC_WORDS = {
     "smartphone", "runway", "makeup", "wedding", "sports", "football", "soccer",
 }
 
+VISION_MIN_GAP = 6.0           # seconds between photo-check requests (~10 per minute) so a burst cannot trip the free per-minute limit
 PHOTO_MIN_SCORE = 7              # Gemini rates the best candidate 0-10; below this it is rejected as not relevant
 VISION_CHECKS_PER_RUN = 36      # cap on Gemini photo-check calls per run (a video run makes ~15-20)
 _vision_state = {"used": 0, "disabled": False}
@@ -1753,6 +1765,32 @@ def _photo_match_score(photo, words):
     """How many of the query's subject words appear in the photo's description."""
     alt = set(re.findall(r"[a-z]+", (photo.get("alt") or "").lower()))
     return sum(1 for w in words if w in alt)
+
+
+def _quota_info(res):
+    """Reads a Gemini 429: which limit was hit (its quota id), whether it is per-minute or per-day, and the wait Google suggests."""
+    info = {"id": "", "per_minute": False, "per_day": False, "wait": None}
+    try:
+        details = res.json().get("error", {}).get("details", []) or []
+    except Exception:
+        return info
+    for d in details:
+        if not isinstance(d, dict):
+            continue
+        for v in d.get("violations", []) or []:
+            qid = f"{v.get('quotaId', '')} {v.get('quotaMetric', '')}"
+            info["id"] = info["id"] or (v.get("quotaId") or v.get("quotaMetric") or "")
+            low = qid.lower()
+            if "perminute" in low or "per_minute" in low:
+                info["per_minute"] = True
+            if "perday" in low or "per_day" in low:
+                info["per_day"] = True
+        rd = d.get("retryDelay")
+        if rd:
+            m = re.match(r"\s*([\d.]+)s", str(rd))
+            if m:
+                info["wait"] = float(m.group(1))
+    return info
 
 
 def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
@@ -1807,18 +1845,39 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
             for model in (models if attempt_round == 0 else models[:2]):
                 if model in dead:
                     continue
-                try:
-                    res = requests.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                        params={"key": GEMINI_API_KEY},
-                        json={"contents": [{"parts": parts}]},
-                        timeout=45,
-                    )
-                except Exception as e:
-                    print(f"Photo check: {model} timed out or failed ({str(e)[:80]}).")
+                res = None
+                for retry in (0, 1):
+                    last = _vision_state.get("last")
+                    if last is not None and VISION_MIN_GAP > 0:
+                        gap = VISION_MIN_GAP - (time.monotonic() - last)
+                        if gap > 0:
+                            time.sleep(gap)   # keep under the free per-minute request limit
+                    _vision_state["last"] = time.monotonic()
+                    try:
+                        res = requests.post(
+                            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                            params={"key": GEMINI_API_KEY},
+                            json={"contents": [{"parts": parts}]},
+                            timeout=45,
+                        )
+                    except Exception as e:
+                        print(f"Photo check: {model} timed out or failed ({str(e)[:80]}).")
+                        res = None
+                        break
+                    if res.status_code == 429 and retry == 0:
+                        qi = _quota_info(res)
+                        if qi["per_minute"] and not qi["per_day"]:
+                            wait = min(max(qi["wait"] or 20, 5), 65)
+                            print(f"Photo check: {model} hit a per-minute limit ({qi['id']}), waiting {wait:.0f}s and trying again...")
+                            time.sleep(wait)
+                            continue
+                    break
+                if res is None:
                     continue
                 if res.status_code == 429:
-                    print(f"Photo check: quota hit on {model}.")
+                    qi = _quota_info(res)
+                    print(f"Photo check: quota hit on {model} ({qi['id'] or 'limit not named by Google'}"
+                          f"{', per day' if qi['per_day'] else ', per minute' if qi['per_minute'] else ''}).")
                     dead.add(model)
                     continue
                 if not res.ok:
@@ -1834,6 +1893,8 @@ def _gemini_pick_best_photo(query, photos, ideal=None, subject=None):
                 _vision_state["fails"] = 0
                 idx = int(m.group(1))
                 ms = re.search(r'"score"\s*:\s*(\d+(?:\.\d+)?)', text)
+                if idx and ms:
+                    print(f"Photo check: relevance score {ms.group(1)}/10 for '{query}'.")
                 if idx and ms and float(ms.group(1)) < PHOTO_MIN_SCORE:
                     print(f"Photo check: the best candidate scored {ms.group(1)}/10 for '{query}' — not relevant enough, rejected.")
                     idx = 0
@@ -2281,6 +2342,68 @@ def _rewrite_closing_cost(html_text, new_sentence):
     return head + tail
 
 
+_ITEM_AMT_RE = re.compile(r"\$\s?\d+(?:\.\d+)?(?:\s*(?:-|–|—|to)\s*\$?\s?\d+(?:\.\d+)?)?")
+_INTRO_RANGE_RE = re.compile(r"\$\s?\d+(?:\.\d+)?\s*(?:-|–|—|to|and)\s*\$?\s?\d+(?:\.\d+)?")
+_COST_WORDS_RE = re.compile(r"\b(each|per|run|runs|range|ranges|cost|costs|under|between|spend|only|just)\b", re.I)
+_COMPARE_WORDS_RE = re.compile(r"retail|store-bought|store bought|boutique|designer|sells?\b|worth|original|compared|versus|instead of|normally|high-end", re.I)
+
+
+def _first_heading_pos(html_text):
+    positions = [i for i in (html_text.find("<h2"), html_text.find("<h3"), html_text.find("<table")) if i != -1]
+    return min(positions) if positions else -1
+
+
+def _fix_intro_range(html_text, lo, hi):
+    """The intro often promises a price range ("run from $8 to $22"); make it the table's real range."""
+    cut = _first_heading_pos(html_text)
+    if cut <= 0:
+        return html_text
+    head, rest = html_text[:cut], html_text[cut:]
+    new_range = f"{_money(lo)} to {_money(hi)}"
+
+    def fix_sentence(sent):
+        if _INTRO_RANGE_RE.search(sent) and _COST_WORDS_RE.search(sent) and not _COMPARE_WORDS_RE.search(sent):
+            return _INTRO_RANGE_RE.sub(new_range, sent, count=1)
+        return sent
+
+    def fix_paragraph(m):
+        return m.group(1) + " ".join(fix_sentence(x) for x in re.split(r"(?<=[.!?])\s+", m.group(2))) + m.group(3)
+
+    return re.sub(r"(<p\b[^>]*>)(.*?)(</p>)", fix_paragraph, head, flags=re.DOTALL) + rest
+
+
+def _sync_item_costs(html_text, rows):
+    """
+    Under each item the model writes its own "Cost: About $15-$22" line, which then disagrees with the table. When
+    the number of such lines equals the number of priced table rows, each line gets its row's amount.
+    """
+    cells = []
+    for row in rows[1:]:
+        if not row or "total" in row[0].lower():
+            continue
+        cell = next((c for c in row[1:] if "$" in c), None)
+        if cell:
+            m = _ITEM_AMT_RE.search(cell)
+            if m:
+                cells.append(m.group(0))
+    start = html_text.find("<h2")
+    end = html_text.find("<table")
+    if start == -1 or end == -1 or end <= start or not cells:
+        return html_text
+    body = html_text[start:end]
+    paragraphs = [m for m in re.finditer(r"<p\b[^>]*>.*?</p>", body, re.DOTALL)
+                  if re.search(r"\bcost\b", m.group(0), re.I) and "$" in m.group(0) and "<em>" not in m.group(0).lower()]
+    if len(paragraphs) != len(cells):
+        return html_text
+    out, last = [], 0
+    for m, cell in zip(paragraphs, cells):
+        out.append(body[last:m.start()])
+        out.append(_ITEM_AMT_RE.sub(cell, m.group(0), count=1))
+        last = m.end()
+    out.append(body[last:])
+    return html_text[:start] + "".join(out) + html_text[end:]
+
+
 def split_long_paragraphs(html_text, max_words=60):
     """Breaks any <p> of more than ~75 words into shorter paragraphs at sentence ends (words unchanged)."""
     abbrev = ("e.g.", "i.e.", "vs.", "approx.", "etc.", "oz.", "ft.", "no.")
@@ -2347,6 +2470,8 @@ def fix_listicle_cost(draft):
                 draft["total_cost"] = (f"{fmt_amt(lo)}-{fmt_amt(hi)}{suffix}" if lo != hi else f"{fmt_amt(lo)}{suffix}")
                 if unit.startswith("per "):   # the closing "total" sentence is rebuilt from the table too
                     noun = unit[4:]
+                    draft["html"] = _sync_item_costs(draft["html"], rows)
+                    draft["html"] = _fix_intro_range(draft["html"], lo, hi)
                     draft["html"] = _rewrite_closing_cost(
                         draft["html"],
                         (f"Each {noun} costs between {_money(lo)} and {_money(hi)}, so you can pick the ones that fit your budget."
@@ -3252,13 +3377,16 @@ def count_words(html_text):
     return len(re.sub(r"<[^>]+>", " ", html_text or "").split())
 
 
-def build_expansion_prompt(draft, target_words=700):
+def build_expansion_prompt(draft, target_words=650):
     """The task for a draft that is only slightly too short: make the SAME article longer with NEW detail."""
     fields = {k: v for k, v in draft.items() if not str(k).startswith("_")}
     words = count_words(draft.get("html", ""))
+    entry = next((e for e in SUBJECT_POOL if e[0] == draft.get("_subject")), None)
+    subject_rule = (f"- The subject of this article is {entry[2]}: keep the new detail about it and name it in most of the "
+                    f"paragraphs you add.\n" if entry else "")
     return (
         f"You are editing a draft blog article that is too short: its html has about {words} words. Bring it to "
-        f"about {target_words} words (at least 650, never more than {target_words + 80}).\n\n"
+        f"about {target_words} words (at least 620, never more than {target_words + 70}).\n\n"
         "Return the SAME article as one JSON object with EXACTLY the same fields, the same title and category, the same "
         "faq, pin fields, image_prompt and section_images, but with a longer \"html\".\n\n"
         "Rules:\n"
@@ -3269,6 +3397,7 @@ def build_expansion_prompt(draft, target_words=700):
         "about 60 words at most) or list items, never into one long block.\n"
         "- NEVER repeat or restate anything already in the article: no recap, no extra \"step-by-step\" list that repeats "
         "the sections above, no same tip twice in different words.\n"
+        + subject_rule +
         "- Keep the html structure (h2/h3/p/ul/ol/table). No brand or store names. No claims of personal experience "
         "(never \"I tried\", \"in my home\"); speak to the reader.\n"
         "- Output ONLY the JSON object, with every html attribute value in single quotes.\n\n"
