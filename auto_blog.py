@@ -471,6 +471,11 @@ def find_quality_problems(draft, min_words=600):
     words = len(body_text.split())
     if words < min_words:
         problems.append(f"too short ({words} words, minimum {min_words})")
+    fmt_name = draft.get("_format")
+    unit = COST_UNIT_BY_FORMAT.get(fmt_name)
+    if fmt_name in SUM_FORMATS or (unit and unit.startswith("per ")):
+        if len(_price_rows(_table_rows(draft.get("html", "")))) < 2:
+            problems.append("no price table (the cost total cannot be checked)")
     if not subject_followed(draft):
         entry = next((e for e in SUBJECT_POOL if e[0] == draft.get("_subject")), None)
         problems.append(f"ignored the assigned subject ({entry[2] if entry else draft.get('_subject')})")
@@ -1270,6 +1275,8 @@ CONSISTENCY RULES (readers notice contradictions, so check these before you answ
   are needed if any step uses a drill or a saw.
 - The FAQ answers must agree with the article: the same products and the same methods (if the article seals
   wood with mineral oil, the FAQ must not recommend a different sealer).
+- Every piece the steps use (sides, legs, shelves, rails, cleats) must appear in the materials list with its size,
+  and the cut lengths must add up to something that can really be built.
 
 SAFETY: never suggest mixing cleaning chemicals (for example bleach with vinegar or ammonia). If a step uses
 oil-soaked rags (linseed or tung oil), spray paint, solvents or heat, add one short safety line (ventilate the
@@ -2265,6 +2272,15 @@ def _fmt_minutes(v):
     return f"{v / 60:g} hour{'s' if v / 60 != 1 else ''}" if v >= 60 else f"{v:g} min"
 
 
+COST_UNIT_BY_FORMAT = {
+    "listicle": "per idea", "mistakes and fixes": "per fix", "thrift buying guide": "", "myth-busting": "per method",
+    "renter-friendly ideas": "per idea", "quick fixes under an hour": "per fix", "diy gift ideas": "per gift",
+    "this vs that": "depending on the option", "seasonal checklist": "per task", "color palette guide": "per item",
+    "small space solutions": "per solution", "care and cleaning guide": "per item", "thrift shopping list": "per item",
+    "splurge or save": "per item", "decor rules": "per rule",
+}
+
+
 SUM_FORMATS = {"project tutorial", "room refresh plan", "project walkthrough with pitfalls", "styling guide"}
 _TOTAL_SENTENCE_RE = re.compile(
     r"\b(all in|in total|altogether|overall|total|came (?:out )?to|comes? (?:out )?to|add(?:s|ed)? up|came in at|"
@@ -2462,12 +2478,7 @@ def fix_listicle_cost(draft):
         amount = lambda t: [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", t)]
         fmt_amt = lambda v: f"${v:g}"
 
-        unit = {"listicle": "per idea", "mistakes and fixes": "per fix", "thrift buying guide": "",
-                "myth-busting": "per method", "renter-friendly ideas": "per idea", "quick fixes under an hour": "per fix",
-                "diy gift ideas": "per gift", "this vs that": "depending on the option", "seasonal checklist": "per task",
-                "color palette guide": "per item", "small space solutions": "per solution",
-                "care and cleaning guide": "per item", "thrift shopping list": "per item", "splurge or save": "per item",
-                "decor rules": "per rule"}.get(fmt)
+        unit = COST_UNIT_BY_FORMAT.get(fmt)
         if unit is not None:
             amounts = [v for row in rows[1:] for cell in row for v in amount(cell)]
             if len(amounts) >= 2:
@@ -2528,8 +2539,31 @@ def fix_listicle_cost(draft):
         print(f"Cost/time fix skipped ({e}).")
 
 
+_TITLE_SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "in", "of", "on", "or", "the", "to", "vs", "via", "with"}
+
+
+def title_case_if_needed(title):
+    """Titles written in sentence case ("A $25 entryway shoe bench that looks like...") get the site's Title Case."""
+    words = (title or "").split()
+    long_words = [w for w in words[1:] if re.search(r"[A-Za-z]", w) and w.lower().strip("(\"'") not in _TITLE_SMALL_WORDS]
+    if not long_words:
+        return title
+    lower = [w for w in long_words if re.search(r"[A-Za-z]", w).group(0).islower()]
+    if len(lower) / len(long_words) < 0.5:
+        return title   # already Title Case (or an unusual style we leave alone)
+    out = []
+    for i, w in enumerate(words):
+        m = re.search(r"[A-Za-z]", w)
+        if m and (i == 0 or i == len(words) - 1 or w.lower().strip("(\"',:.!?") not in _TITLE_SMALL_WORDS):
+            j = m.start()
+            w = w[:j] + w[j].upper() + w[j + 1:]
+        out.append(w)
+    return " ".join(out)
+
+
 def finalize_draft_text(draft):
     """Everything that must be true of the text no matter what the model wrote: totals from the table, short paragraphs."""
+    draft["title"] = title_case_if_needed(draft.get("title", ""))
     fix_listicle_cost(draft)
     draft["html"] = split_long_paragraphs(draft.get("html", ""))
 
@@ -3414,21 +3448,27 @@ def build_expansion_prompt(draft, target_words=650):
     )
 
 
+def _expandable(problems):
+    """True when a longer version could fix every problem: too short, possibly with a thin mention of the subject."""
+    return (any(p.startswith("too short") for p in problems)
+            and all(p.startswith(("too short", "ignored the assigned subject")) for p in problems))
+
+
 def expand_short_draft(draft, niche, history, problems):
     """
-    A draft whose ONLY problem is being too short (but not hopelessly: 250+ words) gets up to two
-    requests to write a longer version of the same article (the second pass starts from the first
+    A draft whose only problems are being too short (but not hopelessly: 250+ words) and, maybe, naming its
+    subject too rarely gets up to three requests to write a longer version of the same article (the second pass starts from the first
     pass's result if that grew but is still short), instead of being thrown away and a new topic
     requested. Returns (draft, duplicate_of, problems): the expanded version once it passes every
     check, otherwise the original untouched.
     """
     current = draft
-    for pass_no in (1, 2):
+    for pass_no in (1, 2, 3):
         words = count_words(current.get("html", ""))
         if words < 250:
             break
         print(f"Draft '{draft['title']}' is only {words} words - asking for a longer version of the same article "
-              f"(new detail, no repeats), pass {pass_no}/2...")
+              f"(new detail, no repeats), pass {pass_no}/3...")
         try:
             expanded = normalize_draft(generate_draft(history, niche, expand_from=current))
             finalize_draft_text(expanded)
@@ -3443,7 +3483,7 @@ def expand_short_draft(draft, niche, history, problems):
             return expanded, None, []
         print(f"Expansion pass {pass_no} did not fix it ({new_words} words; "
               f"{'; '.join(new_problems) or 'title became a duplicate'}).")
-        if duplicate_of is None and new_problems and all(p.startswith("too short") for p in new_problems) and new_words > words:
+        if (duplicate_of is None and new_problems and _expandable(new_problems) and new_words > words):
             current = expanded   # it grew but is still short: one more pass from this version
             continue
         break
@@ -3500,7 +3540,7 @@ def main():
             finalize_draft_text(draft)
             duplicate_of = find_duplicate_title(draft["title"], history)
             quality_problems = find_quality_problems(draft)
-            if duplicate_of is None and quality_problems and all(p.startswith("too short") for p in quality_problems):
+            if duplicate_of is None and quality_problems and _expandable(quality_problems):
                 draft, duplicate_of, quality_problems = expand_short_draft(draft, niche, history, quality_problems)
             if duplicate_of is None and not quality_problems:
                 if attempt >= MAX_TOPIC_ATTEMPTS or draft_has_hero_photo(draft, history):
