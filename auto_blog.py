@@ -1,4 +1,4 @@
-""""""
+"""
 Fully automatic Blogger publisher for a budget home-decor blog.
 
 Flow each run:
