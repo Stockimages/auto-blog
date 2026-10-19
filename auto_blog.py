@@ -1,4 +1,4 @@
-"""
+""""""
 Fully automatic Blogger publisher for a budget home-decor blog.
 
 Flow each run:
@@ -459,7 +459,7 @@ def find_repeated_text(html_text):
     return None
 
 
-def find_quality_problems(draft, min_words=600):
+def find_quality_problems(draft, min_words=400):
     """
     Returns a list of reasons this draft shouldn't be published (empty list =
     fine). Prompts are only requests, so these are checked in code, the same
@@ -471,11 +471,6 @@ def find_quality_problems(draft, min_words=600):
     words = len(body_text.split())
     if words < min_words:
         problems.append(f"too short ({words} words, minimum {min_words})")
-    fmt_name = draft.get("_format")
-    unit = COST_UNIT_BY_FORMAT.get(fmt_name)
-    if fmt_name in SUM_FORMATS or (unit and unit.startswith("per ")):
-        if len(_price_rows(_table_rows(draft.get("html", "")))) < 2:
-            problems.append("no price table (the cost total cannot be checked)")
     if not subject_followed(draft):
         entry = next((e for e in SUBJECT_POOL if e[0] == draft.get("_subject")), None)
         problems.append(f"ignored the assigned subject ({entry[2] if entry else draft.get('_subject')})")
@@ -508,37 +503,25 @@ def find_quality_problems(draft, min_words=600):
     if re.match(r"^[A-Z][A-Z0-9 \-]{3,}:\s", draft.get("title", "")):
         problems.append("title starts with a capitalised label such as \"BEFORE-AND-AFTER:\"")
 
-    # Prices in the title must agree with the article's own table (a title said
-    # "$12 Thrifted Plastic Basket" while the table priced the basket at $6).
-    title = draft.get("title", "")
-    rows = _table_rows(draft.get("html", ""))
-    table_amounts = {float(x) for row in rows for cell in row for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", cell)}
-    if table_amounts:
-        for m in re.finditer(r"\$\s?(\d+(?:\.\d+)?)\s+thrift(?:ed)?\b", title, re.IGNORECASE):
-            n = float(m.group(1))
-            if n not in table_amounts:
-                problems.append(f"title says \"${n:g} thrifted...\" but the table never shows ${n:g}")
-    if draft.get("_format") not in ("listicle", "mistakes and fixes"):
-        totals = [float(x) for x in re.findall(r"\$\s?(\d+(?:\.\d+)?)", str(draft.get("total_cost", "")))]
-        for m in re.finditer(r"(?:under|below|less than)\s+\$\s?(\d+(?:\.\d+)?)", title, re.IGNORECASE):
-            n = float(m.group(1))
-            if totals and n < max(totals):
-                problems.append(f"title promises \"under ${n:g}\" but the article's total is ${max(totals):g}")
+    # No prices anywhere (they change all the time and every total was a place for a mistake). The text is cleaned
+    # by strip_prices(); a price that is still in the TITLE cannot be cleaned, so such a draft is rejected.
+    if PRICE_RE.search(draft.get("title", "")):
+        problems.append("the title contains a price (prices are not allowed anywhere)")
+    elif PRICE_RE.search(draft.get("html", "")):
+        problems.append("the article contains a price (prices are not allowed anywhere)")
     return problems
 
 
 TITLE_STYLES = [
-    "lead with the transformation, e.g. \"This $9 Thrifted Lamp Now Looks Like a $300 Designer Piece\"",
-    "a curious question the project answers, e.g. \"Can a $12 Thrifted Mirror Really Pass for Antique Brass?\"",
-    "lead with the budget, e.g. \"A Hanging Planter From a Thrifted Colander for Under $20\"",
+    "lead with the transformation, e.g. \"This Thrifted Lamp Now Looks Like a Designer Piece\"",
+    "a curious question the project answers, e.g. \"Can a Thrifted Mirror Really Pass for Antique Brass?\"",
+    "lead with the budget in words, e.g. \"A Hanging Planter From a Thrifted Colander on a Tiny Budget\"",
     "a clear, search-friendly tutorial title, e.g. \"DIY Aged Brass Boot Tray From a Thrifted Metal Tray\"",
-    "a from-to makeover title, e.g. \"From Thrift Store Colander to Zinc Planter: A $18 Makeover\"",
-    "lead with the saving, e.g. \"A $20 Entryway Bench That Looks Like It Cost $400\"",
-]
-TITLE_STYLES += [
+    "a from-to makeover title, e.g. \"From Thrift Store Colander to Zinc Planter\"",
+    "lead with the look, e.g. \"A Budget Entryway Bench That Looks Expensive\"",
     "a beginner-friendly project title, e.g. \"An Easy Beginner Project: Painted Wooden Bead Garland\"",
     "a time-led title, e.g. \"A Thrifted Frame Gallery Wall You Can Finish in One Afternoon\"",
-    "a skip-the-store title, e.g. \"Skip the Store: A Thrifted Crate Side Table for Under $15\"",
+    "a skip-the-store title, e.g. \"Skip the Store: A Thrifted Crate Side Table on a Budget\"",
     "a materials-led title, e.g. \"Wood, Rope and Paint: A Simple DIY Wall Shelf\"",
     "a no-tools title, e.g. \"A No-Drill Thrifted Frame Gallery for Renters\"",
     "a small-detail title, e.g. \"The Little Trick That Makes Plain Candle Holders Look Aged\"",
@@ -557,89 +540,63 @@ TITLE_STYLES += [
 # a row. NOTE: this uses a seasonal calendar, not live trend data.
 # ---------------------------------------------------------------------------
 POST_FORMATS = [
-    {"name": "project tutorial", "weight": 3, "use_title_styles": True,
-     "instruction": "A single start-to-finish thrift-flip or DIY project, explained step by step.",
-     "needs_list": True,
-     "table_hint": "a materials and cost breakdown with columns Item, Price"},
-    {"name": "listicle", "weight": 3, "use_title_styles": False,
-     "instruction": "A numbered list post of 5-9 ideas. Each idea gets its own h2/h3 with a concrete tip, a rough cost and why it works. NOT a single step-by-step project and NOT the 'turn X into Y' framing. Costs are PER IDEA: total_cost must be the range of the per-idea costs in your table (for example \"$6-$30 per idea\"), and the closing paragraph must state that same per-idea range, never a single total that contradicts the table.",
-     "table_hint": "a summary table with columns Idea, Approx. cost, Time",
+    {"name": 'project tutorial', "weight": 3, "use_title_styles": True, "needs_list": True,
+     "instruction": 'A single start-to-finish thrift-flip or DIY project, explained in simple numbered steps. Name every material once in the list at the top and use only those. Never mention a price or any dollar amount.'},
+    {"name": 'listicle', "weight": 3, "use_title_styles": False,
+     "instruction": 'A numbered list post of 5-6 ideas. Each idea gets its own h2/h3 with one concrete tip and why it works. NOT a single step-by-step project. Never mention a price or any dollar amount.',
      "title_hint": "number-led and specific, in your own words, for example '7 Budget Ways to Make a Small Bedroom Feel Bigger' or '5 Easy Swaps That Make a Rental Kitchen Look Custom' or '9 Thrift Finds That Look Expensive on a Shelf'"},
-    {"name": "room refresh plan", "weight": 2, "use_title_styles": False,
-     "instruction": "A whole-room (or whole-area) refresh plan on a budget: what to change first, what to skip, and the order to do it in.",
-     "table_hint": "a shopping list with columns Item, Where to buy, Price",
-     "title_hint": "budget-led, in your own words, for example 'A Cozy Living Room Refresh for Under $150' or 'How to Refresh a Tiny Bathroom for Under $60' or 'A Weekend Entryway Makeover on a Real Budget'"},
-    {"name": "thrift buying guide", "weight": 2, "use_title_styles": False,
-     "instruction": "A guide to buying a type of item second-hand: what to look for, red flags, fair prices, where to find it.",
-     "table_hint": "a table with columns What to look for, Fair price, Red flags",
-     "title_hint": "practical and specific to the item, in your own words, for example 'How to Spot a Solid Wood Dresser at the Thrift Store' or 'Buying Second-Hand Mirrors: What to Check Before You Pay' or 'Thrifted Lamps: Which Ones Are Worth Rewiring'. Do not start with 'What to Look For When Thrifting'."},
-    {"name": "mistakes and fixes", "weight": 2, "use_title_styles": False,
-     "instruction": "Common mistakes that make a room look cheap, cluttered or dated, each paired with a specific, inexpensive fix. Costs are PER FIX: total_cost must be the range of the per-fix costs in your table, and any total you state in the text must equal the sum of the table.",
-     "table_hint": "a table with columns Mistake, Quick fix, Cost",
-     "title_hint": "in your own words, for example '6 Mistakes That Make Your Entryway Look Cluttered (and How to Fix Them)' or '5 Lighting Mistakes That Make a Bedroom Feel Cold' or 'Why Your Shelves Look Messy and What to Do About It'. Never use the word 'cheap' twice in the title."},
-    {"name": "project walkthrough with pitfalls", "weight": 2, "use_title_styles": True, "needs_list": True,
-     "instruction": "A walkthrough of one makeover that is honest about what can go wrong: the common pitfalls at each step, how to avoid them, and what the finished result should look like. Written as a guide ('you'), NOT as a personal story.",
-     "table_hint": "a table of what you bought and what it cost, columns Item, Price"},
-    {"name": "designer look for less", "weight": 2, "use_title_styles": False,
-     "instruction": "Recreate a high-end look with budget or thrifted alternatives. Describe the pricey version in general terms (never name a brand, store or product) and compare it to the budget version piece by piece.",
-     "table_hint": "a comparison table with columns High-end version (described, not named), Budget version, Typical savings (a range)",
-     "title_hint": "in your own words, for example 'The Designer Mantel Look for a Fraction of the Price' or 'Get a Boutique Hotel Bedroom Look Without the Price' or 'Expensive-Looking Shelves Made From Thrift Finds'"},
-    {"name": "styling guide", "weight": 2, "use_title_styles": False,
-     "instruction": "How to style ONE spot (mantel, shelf, entry table, coffee table, nightstand, porch) in simple layers with easy rules a beginner can follow.",
-     "table_hint": "a table with columns Layer, What to use, Approx. cost",
-     "title_hint": "in your own words, for example 'How to Style a Mantel in 4 Simple Layers' or 'A Simple Way to Style Your Coffee Table Like a Designer' or 'Bookshelf Styling Rules Anyone Can Follow'"},
-    {"name": "myth-busting", "weight": 1, "use_title_styles": False,
-     "instruction": "Examine a popular budget decor trick or product type (chalk paint, peel-and-stick, thrifted rugs, thrifted lamps) and explain honestly, from how the materials generally behave, what usually works, what usually doesn't and why. Do NOT claim anything was tested: never write 'we tested', 'in testing', 'testing revealed' or 'our tests'. Use 'usually', 'often' and 'most people find'.",
-     "table_hint": "a table with columns Method, What usually happens, Verdict",
-     "title_hint": "a curious question or honest verdict, in your own words, for example 'Does Peel-and-Stick Backsplash Really Last? What Actually Happens Over Time' or 'Is Chalk Paint Worth It on Old Furniture?' or 'Do Thrifted Rugs Hold Up in a Busy Hallway?'. Never write the title in the first person (no 'I' or 'my')."},
-]
-
-_PER_ITEM_RULE = ("Costs are PER {unit}: total_cost must be the range of the per-{unit} costs in your table, and any "
-                  "total you state in the text must equal that range, never a single total that contradicts the table.")
-POST_FORMATS += [
-    {"name": "renter-friendly ideas", "weight": 2, "use_title_styles": False,
-     "instruction": "A numbered list post of 5-8 ideas that need no drilling, no painting and nothing permanent, so a renter can undo every change and keep the deposit. Each idea gets its own h2/h3 with a concrete tip, a rough cost and how it comes off again. " + _PER_ITEM_RULE.format(unit="idea"),
-     "table_hint": "a summary table with columns Idea, Approx. cost, How to undo it",
+    {"name": 'room refresh plan', "weight": 2, "use_title_styles": False,
+     "instruction": 'A refresh plan for ONE room or area on a budget: what to change first, what to skip and the order to do it in. Keep it to 4-5 simple steps. Never mention a price or any dollar amount.',
+     "title_hint": "in your own words, for example 'A Cozy Living Room Refresh on a Real Budget' or 'How to Refresh a Tiny Bathroom Without Overspending' or 'A Weekend Entryway Makeover on a Budget'"},
+    {"name": 'thrift buying guide', "weight": 2, "use_title_styles": False,
+     "instruction": 'A guide to buying ONE kind of item second-hand: what to look for, the red flags and where to find it. Never mention a price or any dollar amount.',
+     "title_hint": "practical and specific, in your own words, for example 'What to Look For When Thrifting Wooden Bowls' or 'Buying Second-Hand Mirrors: What to Check First'"},
+    {"name": 'mistakes and fixes', "weight": 2, "use_title_styles": False,
+     "instruction": 'Common mistakes that make a room look cheap, cluttered or dated, each paired with one specific, simple fix. Never mention a price or any dollar amount.',
+     "title_hint": "number-led, in your own words, for example '5 Porch Mistakes That Make Your Home Look Uninviting' or '6 Shelf Styling Mistakes and How to Fix Them'"},
+    {"name": 'project walkthrough with pitfalls', "weight": 2, "use_title_styles": True, "needs_list": True,
+     "instruction": "A walkthrough of one makeover that is honest about what can go wrong: the common pitfalls at each step, how to avoid them and what the finished result should look like. Written as a guide ('you'), NOT as a personal story. Name every material once in the list at the top. Never mention a price or any dollar amount."},
+    {"name": 'designer look for less', "weight": 2, "use_title_styles": False,
+     "instruction": 'Recreate a high-end look with budget or thrifted alternatives. Describe the pricey version in general terms (never a brand, store or product) and compare it to the budget version piece by piece, in words only. Never mention a price or any dollar amount.',
+     "title_hint": "in your own words, for example 'The Designer Mantel Look Without the Designer Budget' or 'A Boutique Hotel Bedroom Look on a Budget'"},
+    {"name": 'styling guide', "weight": 2, "use_title_styles": False,
+     "instruction": 'How to style ONE spot (mantel, shelf, entry table, coffee table, nightstand, porch) in simple layers with easy rules a beginner can follow. Never mention a price or any dollar amount.',
+     "title_hint": "in your own words, for example 'How to Style a Mantel in 4 Simple Layers' or 'A Simple Way to Style Your Coffee Table Like a Designer'"},
+    {"name": 'myth-busting', "weight": 1, "use_title_styles": False,
+     "instruction": 'Pick 4-5 common decorating or thrifting myths and say honestly what is true, with the reason, in plain words. Base it on how materials and rooms generally behave. Never mention a price or any dollar amount.',
+     "title_hint": "in your own words, for example '5 Thrifting Myths That Cost You Good Finds' or 'Does Peel-and-Stick Really Damage Walls?'"},
+    {"name": 'renter-friendly ideas', "weight": 2, "use_title_styles": False,
+     "instruction": 'A numbered list post of 5-6 ideas that need no drilling, no painting and nothing permanent, so a renter can undo every change and keep the deposit. Each idea gets its own h2/h3 with a concrete tip and how it comes off again. Never mention a price or any dollar amount.',
      "title_hint": "number-led and specific, in your own words, for example '6 Renter-Friendly Ways to Warm Up a Plain Living Room' or '5 No-Drill Ideas That Make a Rental Bathroom Feel Finished'"},
-    {"name": "quick fixes under an hour", "weight": 2, "use_title_styles": False,
-     "instruction": "A numbered list post of 5-8 quick improvements that each take 10-60 minutes, so a reader can finish one on a weeknight. Each gets its own h2/h3 with the exact steps in two or three sentences, the time and a rough cost. " + _PER_ITEM_RULE.format(unit="fix"),
-     "table_hint": "a summary table with columns Fix, Time, Approx. cost",
+    {"name": 'quick fixes under an hour', "weight": 2, "use_title_styles": False,
+     "instruction": 'A numbered list post of 5-6 quick improvements that each take 10-60 minutes. Each gets its own h2/h3 with the exact steps in two or three sentences and how long it takes. Never mention a price or any dollar amount.',
      "title_hint": "number-led and specific, in your own words, for example '7 Fifteen-Minute Fixes That Make a Room Look Finished' or '6 Quick Entryway Upgrades You Can Do Tonight'"},
-    {"name": "diy gift ideas", "weight": 1, "use_title_styles": False,
-     "instruction": "A numbered list post of 5-8 handmade or thrift-flip gift ideas for a specific kind of person or occasion. Each gets its own h2/h3 with what to make, the supplies, a rough cost, the time and a simple way to wrap it. " + _PER_ITEM_RULE.format(unit="gift"),
-     "table_hint": "a summary table with columns Gift, Approx. cost, Time",
+    {"name": 'diy gift ideas', "weight": 1, "use_title_styles": False,
+     "instruction": 'A numbered list post of 5-6 handmade or thrift-flip gift ideas for a specific kind of person or occasion. Each gets its own h2/h3 with what to make, the supplies and a simple way to wrap it. Never mention a price or any dollar amount.',
      "title_hint": "number-led and specific, in your own words, for example '5 Thoughtful Gifts to Make From Thrift Store Finds' or '6 Simple Handmade Gifts for People Who Love Their Kitchen'"},
-    {"name": "this vs that", "weight": 1, "use_title_styles": False,
-     "instruction": "An honest side-by-side comparison of two budget options for the same job (for example paint vs peel-and-stick, or thrifted vs new baskets): cost, effort, look, durability and who should pick which. Base it on how the materials generally behave; never claim you tested them. End with a clear recommendation for each type of reader.",
-     "table_hint": "a comparison table with columns Factor, Option A, Option B, with the typical cost of each option in its own row",
-     "title_hint": "a clear comparison, in your own words, for example 'Paint or Peel-and-Stick: Which Is Better for a Rental Wall?' or 'Thrifted Baskets or New Ones: Which Is Worth the Money?'"},
-    {"name": "seasonal checklist", "weight": 1, "use_title_styles": False,
-     "instruction": "A practical checklist for getting ONE space ready for the season or an event, grouped into what to do first, next and last, with the time and a rough cost for each task. " + _PER_ITEM_RULE.format(unit="task"),
-     "table_hint": "a checklist table with columns Task, Time, Approx. cost",
+    {"name": 'this vs that', "weight": 1, "use_title_styles": False,
+     "instruction": 'An honest side-by-side comparison of two budget options for the same job (for example paint vs peel-and-stick): effort, look, durability and who should pick which. Base it on how the materials generally behave; never claim you tested them. End with a clear recommendation for each type of reader. Never mention a price or any dollar amount.',
+     "title_hint": "a clear comparison, in your own words, for example 'Paint or Peel-and-Stick: Which Is Better for a Rental Wall?' or 'Thrifted Baskets or New Ones: Which Is Worth It?'"},
+    {"name": 'seasonal checklist', "weight": 1, "use_title_styles": False,
+     "instruction": 'A practical checklist for getting ONE space ready for the season or an event, grouped into what to do first, next and last, with roughly how long each task takes. Never mention a price or any dollar amount.',
      "title_hint": "in your own words, for example 'A Simple Checklist for Getting Your Entryway Ready for Guests' or 'A Weekend Checklist to Make a Guest Room Feel Welcoming'"},
-    {"name": "color palette guide", "weight": 1, "use_title_styles": False,
-     "instruction": "How to choose and build a cohesive colour palette for one room on a budget: how many colours, the 60-30-10 idea, where each colour shows up in the room and a cheap way to add each one. Use generic colour names only. " + _PER_ITEM_RULE.format(unit="item"),
-     "table_hint": "a table with columns Role in the room, Colour idea, Budget way to add it, Approx. cost",
+    {"name": 'color palette guide', "weight": 1, "use_title_styles": False,
+     "instruction": 'How to choose and build a cohesive colour palette for one room on a budget: how many colours, the 60-30-10 idea, where each colour shows up in the room and a cheap way to add each one. Use generic colour names only. Never mention a price or any dollar amount.',
      "title_hint": "in your own words, for example 'How to Build a Calm Neutral Palette for a Bedroom on a Budget' or 'Choosing Warm Colors for a Cozy Living Room Without Repainting'"},
-    {"name": "small space solutions", "weight": 2, "use_title_styles": False,
-     "instruction": "A problem-and-solution post for ONE kind of small space (tiny bathroom, studio, narrow hallway, small bedroom): 5-8 specific problems, each paired with an inexpensive solution and a rough cost. " + _PER_ITEM_RULE.format(unit="solution"),
-     "table_hint": "a table with columns Problem, Solution, Approx. cost",
-     "title_hint": "number-led and specific, in your own words, for example '7 Ways to Fit More Storage Into a Tiny Bathroom' or '6 Smart Fixes for a Narrow Hallway'"},
-    {"name": "care and cleaning guide", "weight": 1, "use_title_styles": False,
-     "instruction": "How to clean, refresh or safely repair one kind of second-hand item or material (wood, brass, glass, ceramic, wicker, textiles): what to test first, the gentle method, and what to avoid. Written from how materials generally behave; never claim you tried it. " + _PER_ITEM_RULE.format(unit="item"),
-     "table_hint": "a table with columns Item or material, Safe method, Supplies cost",
+    {"name": 'small space solutions', "weight": 2, "use_title_styles": False,
+     "instruction": 'A problem-and-solution post for ONE kind of small space (tiny bathroom, studio, narrow hallway, small bedroom): 5-6 specific problems, each paired with one inexpensive solution. Never mention a price or any dollar amount.',
+     "title_hint": "number-led and specific, in your own words, for example '6 Ways to Fit More Storage Into a Tiny Bathroom' or '5 Smart Fixes for a Narrow Hallway'"},
+    {"name": 'care and cleaning guide', "weight": 1, "use_title_styles": False,
+     "instruction": 'How to clean, refresh or safely repair ONE kind of second-hand item or material (wood, brass, glass, ceramic, wicker, textiles): what to test first, the gentle method and what to avoid. Written from how materials generally behave; never claim you tried it. Never mention a price or any dollar amount.',
      "title_hint": "practical and specific, in your own words, for example 'How to Clean and Refresh Thrifted Brass Without Ruining It' or 'Giving Old Wicker Baskets a Second Life: What Works'"},
-    {"name": "thrift shopping list", "weight": 2, "use_title_styles": False,
-     "instruction": "A curated shopping list for ONE room or look: what to hunt for on a thrift-store trip, a fair price range for each piece and what to check before buying it. " + _PER_ITEM_RULE.format(unit="item"),
-     "table_hint": "a table with columns Item to find, Fair price, What to check",
+    {"name": 'thrift shopping list', "weight": 2, "use_title_styles": False,
+     "instruction": 'A curated shopping list for ONE room or look: what to hunt for on a thrift-store trip and what to check on each piece before buying it. Never mention a price or any dollar amount.',
      "title_hint": "in your own words, for example 'A Thrift Store Shopping List for a Cozy Reading Nook' or 'What to Hunt for When Thrifting a Warm Entryway'"},
-    {"name": "splurge or save", "weight": 1, "use_title_styles": False,
-     "instruction": "Where to spend a little more and where to save when decorating ONE room, piece by piece, with a clear reason for each choice. " + _PER_ITEM_RULE.format(unit="item"),
-     "table_hint": "a table with columns Item, Spend or save, Typical price",
+    {"name": 'splurge or save', "weight": 1, "use_title_styles": False,
+     "instruction": 'Where to spend a little more and where to save when decorating ONE room, piece by piece, with a clear reason for each choice. Say it in words (spend a bit more on..., save on...). Never mention a price or any dollar amount.',
      "title_hint": "in your own words, for example 'Where to Splurge and Where to Save When Decorating a Living Room' or 'Spend or Save: A Practical Guide to Furnishing a Small Bedroom'"},
-    {"name": "decor rules", "weight": 1, "use_title_styles": False,
-     "instruction": "Simple designer rules of thumb (rule of three, odd numbers, 60-30-10, eye level, one big statement piece) applied to ONE spot, with a beginner-friendly example for each rule and what it costs to try. " + _PER_ITEM_RULE.format(unit="rule"),
-     "table_hint": "a table with columns Rule, How to apply it, Approx. cost to try",
+    {"name": 'decor rules', "weight": 1, "use_title_styles": False,
+     "instruction": 'Simple designer rules of thumb (rule of three, odd numbers, 60-30-10, eye level, one big statement piece) applied to ONE spot, with a beginner-friendly example for each rule. Never mention a price or any dollar amount.',
      "title_hint": "number-led and specific, in your own words, for example '5 Easy Decorating Rules That Make a Shelf Look Styled' or '4 Simple Rules for a Mantel That Looks Balanced'"},
 ]
 
@@ -839,7 +796,6 @@ SUBJECT_POOL = [
     ("window-boxes", ("window box",), "window boxes"),
     ("lanterns", ("lantern",), "lanterns"),
     ("garden-path", ("garden path", "stepping stone", "walkway"), "a garden path"),
-    ("fire-pit", ("fire pit",), "a fire pit seating area"),
     ("room-divider", ("room divider",), "a room divider"),
     ("floating-shelves", ("floating shelf", "floating shelves"), "floating shelves"),
     ("over-door", ("over-the-door", "over the door"), "over-the-door storage"),
@@ -1020,7 +976,7 @@ SUBJECT_POOL += [
 # Subjects not listed here are usable all year.
 SUBJECT_SEASON = {
     "porch-planters": (3, 10), "outdoor-rug": (4, 9), "garden-pots": (3, 9), "patio-table": (4, 9),
-    "outdoor-seating": (4, 9), "window-boxes": (3, 8), "garden-path": (4, 9), "fire-pit": (4, 11),
+    "outdoor-seating": (4, 9), "window-boxes": (3, 8), "garden-path": (4, 9), 
     "porch-swing": (4, 9), "balcony": (4, 9), "patio-shade": (5, 9), "garden-bench": (4, 10),
     "raised-beds": (3, 7), "herb-planter": (3, 8), "hanging-baskets": (4, 8), "curb-appeal": (3, 10),
     "porch-chairs": (4, 10), "solar-lighting": (3, 10), "outdoor-dining": (4, 9), "tall-planters": (3, 9),
@@ -1214,14 +1170,14 @@ def generate_draft(history, niche, expand_from=None):
         title_line = (
             f"TITLE STYLE for THIS post (the site's titles had become too similar to each\n"
             f"other, so follow this one): {title_style}. Do NOT start the title with\n"
-            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W". Write the '
+            f'"How to Turn". NEVER put a price or any dollar amount in the title; say budget, cheap or thrifted in words. Write the '
             f'title in normal sentence case; never begin it with a label in capital letters followed by a colon. '
             f'Never copy an example title word for word.'
         )
     else:
         title_line = (
             f"TITLE for THIS post: {fmt['title_hint']}. Do NOT start the title with\n"
-            f'"How to Turn" and do not use the pattern "Thrifted X into a $Y Z for $W". '
+            f'"How to Turn". NEVER put a price or any dollar amount in the title; say budget, cheap or thrifted in words. '
             f'Never copy an example title word for word.'
         )
 
@@ -1249,25 +1205,20 @@ NO BRANDS (important — a post with brand names was removed by Blogger):
   paint brands, and so on. Use generic words instead: "a thrift store", "a
   big-box store", "a high-end retailer", "an online marketplace", "chalk
   paint", "spray paint", "adhesive hooks", "decoupage glue".
-- Never quote a specific real product or its price. When comparing to an
-  expensive look, DESCRIBE the pricey version in general terms and give
-  price ranges ("similar pieces often cost $150-$250"), never a named item.
+- Never quote a specific real product. When comparing to an expensive look, DESCRIBE the pricey version in
+  general terms ("a high-end retailer's piece"), never a named item.
 
 HONESTY RULES (important):
 - Do NOT claim experiences that didn't happen: no "I tried", "I spent", "in my
   home", "my husband", "when I made this". Speak to the reader ("you") or in
   general terms ("most people find...", "a common mistake is...").
-- PRICES are estimates, never receipts. Use "about", "around", "under" or a
-  range ("$15-$25"); thrift prices vary by store and region. Never state an
-  inflated retail value as fact: say "looks like a piece that could cost $400"
-  or "similar pieces often sell for $300-$450". In titles prefer "under $20"
-  or "for about $20" over an exact figure.
+- NEVER write a price, a dollar amount, a cost range, a total or a budget figure anywhere in the post: not in
+  the title, the text, the lists, the FAQ, the pin text or the video script. Prices change all the time and the
+  numbers are where mistakes happen. Use words instead: budget-friendly, cheap, thrifted, inexpensive.
 
 CONSISTENCY RULES (readers notice contradictions, so check these before you answer):
-- Every number you state (price, length, size, quantity, time) must be identical everywhere in the
-  post: intro, steps, table, closing, FAQ and quick facts. If you mention what a store-bought or
-  high-end version costs more than once, use exactly the same figure or range each time.
-- Prices written in the text next to the table must match the table's numbers exactly.
+- Every number you state (length, size, quantity, time) must be identical everywhere in the post: intro,
+  steps, lists, closing and FAQ.
 - Material lengths must add up: the stock you list (for example one 48-inch dowel) must be long
   enough for every piece you tell the reader to cut from it. Multiply count x length and check it
   against the stock length before you write it; list the right stock size instead.
@@ -1282,6 +1233,10 @@ SAFETY: never suggest mixing cleaning chemicals (for example bleach with vinegar
 oil-soaked rags (linseed or tung oil), spray paint, solvents or heat, add one short safety line (ventilate the
 room; lay oily rags flat to dry, or soak them in water, before throwing them away). Never claim that a paint
 or finish is food-safe.
+Anything with flames or real heat (fire pits, fireplaces, space heaters, candles near fabric): only suggest
+fire-safe materials (fire brick, lava rock, metal rings made for fire) and never river rock, pea gravel, wet stones,
+standard concrete blocks, landscape fabric or plastic inside the fire zone; add one short line about clearance from
+the house and local burn rules.
 
 {subject_block}Topics already covered (do NOT repeat these or anything too similar to them):
 {json.dumps(recent_titles, ensure_ascii=False)}
@@ -1325,27 +1280,29 @@ WRITING VOICE — this is the most important instruction:
 - Vary sentence length. Short punchy sentences next to longer ones. Use contractions.
 - Be specific and concrete everywhere: real product TYPES, generic places to shop
   ("a thrift store", "a big-box store", "a home improvement store", "an online
-  marketplace"), real price ranges, real tools, brand-agnostic techniques.
+  marketplace"), real tools, brand-agnostic techniques.
 - A light, opinionated aside is fine ("honestly, skip this step if you're short on time") as long as it doesn't claim a personal experience.
 - NEVER use these overused AI-sounding words/phrases, in any form: {banned_list}.
 - No generic filler sentences that could apply to any home-decor post. Every
   paragraph must teach something specific or move the project forward.
 
-LENGTH: 600-700 words in total (never more than 750). Readers skim, so a tight article beats a long
+LENGTH: 400-550 words in total (never more than 600). Readers skim, so a short, simple article beats a long
 one. Do not pad to hit a word count; every sentence should earn its place.
+
+KEEP IT SIMPLE: plain everyday words, short sentences, one idea per paragraph, and only information you are
+sure is correct. If you are not sure about a detail, leave it out.
 
 PARAGRAPHS: keep every paragraph to 2-4 short sentences (about 60 words at most). Never write one long
 block of text; put lists of tips into <ul> or <ol> items instead.
 
 NO REPEATING TO REACH THE LENGTH: never restate something you already said. Do not end with a
 recap, a "step-by-step process" list or a "quick steps" summary that repeats the sections above,
-and do not say the same tip twice in different words. If the article is short of 600 words,
+and do not say the same tip twice in different words. If the article is short of 400 words,
 add NEW, specific detail instead: exact measurements and quantities, what to buy and what to
 skip, a common mistake and how to fix it, a cheaper swap, a variation, or how to care for the
 finished piece.
 
-STRUCTURE (as HTML, using ONLY these tags: p, h2, h3, ul, ol, li, table, thead,
-tbody, tr, th, td, strong, blockquote, a):
+STRUCTURE (as HTML, using ONLY these tags: p, h2, h3, ul, ol, li, strong, blockquote, a; no tables):
 
 CRITICAL JSON-SAFETY RULE: inside the "html" string, use SINGLE quotes for
 every HTML attribute value (e.g. <a href='https://...'>, not <a href="https://...">).
@@ -1358,30 +1315,21 @@ quotes are the JSON string delimiter and will break the response.
 2. A few h2/h3 sections walking through the real project or tips, using
    <ul> for independent tips/ideas and <ol> for sequential step-by-step
    instructions — pick whichever actually fits each section.
-3. Include ONE real <table> somewhere natural in the article: {fmt["table_hint"]}.
-   Use realistic prices wherever prices appear, and mention the total or a
-   typical budget in the text near the table (e.g. "All in, this came out
-   to about $X").
+3. Do NOT use tables and do NOT write any prices. Short paragraphs and simple lists are enough.
 4. INTERNAL LINKS: here are {len(linkable)} of our own previously published
    posts (title + real URL): {linkable_json}
    If (and only if) 1-3 of them are genuinely relevant to THIS article's
    topic, link to them naturally in-line inside a sentence using
    <a href="the exact URL">relevant anchor text</a> — never a bare "read
    more" list, never a fabricated URL, never forced if nothing fits.
-5. IMAGE PLACEHOLDERS: after the intro and after 2-3 of the major sections
-   (never as the very first thing), insert an image placeholder on its own
-   line: [[IMG_1]], then [[IMG_2]], then [[IMG_3]] if the article is long
-   enough — sequential numbering, 2-3 total. Do not add more placeholders
-   than you provide section_images for.
+5. IMAGE PLACEHOLDERS: insert exactly TWO image placeholders, each on its own line: [[IMG_1]] after the
+   intro and [[IMG_2]] after one of the middle sections (never as the very first thing). No more than two;
+   provide a section_images entry for each.
 
-6. QUICK FACTS: also provide total_cost (the final total from your budget
-   table, e.g. "$26"), time_estimate (e.g. "1 hour", "A weekend"), and
-   difficulty ("Easy", "Moderate", or "Advanced") — used for a quick-take
-   summary box at the top of the post. All three MUST be plain strings
-   (e.g. "$26", not 26; not a list). If this post is NOT a single project
-   (a list, guide or plan), total_cost is the typical total budget to do
-   everything in the post (a range like "$30-$60" is fine), time_estimate is
-   how long it would take, and difficulty is how hard the whole thing is.
+6. QUICK FACTS: also provide time_estimate (e.g. "1 hour", "A weekend") and difficulty ("Easy",
+   "Moderate", or "Advanced"), used for a quick-take summary box at the top of the post. Both MUST be plain
+   strings. If this post is NOT a single project (a list, guide or plan), time_estimate is how long it would
+   take to do everything and difficulty is how hard the whole thing is. Do not give any cost.
 
 7. FAQ: write exactly 3 short, genuinely specific reader questions about
    THIS project (not generic decor questions) with concise 1-2 sentence
@@ -1429,19 +1377,16 @@ Also write:
   Structure:
   1. A punchy 1-sentence hook that would make someone stop scrolling — lean
      hard into the most specific, surprising claim of THIS post: the
-     price-transformation shock for a project, or a concrete number,
-     mistake or result for a list/guide post — a specific, concrete
-     curiosity gap (what it actually is, not "you won't believe this").
-     Specific and unexpected beats generic every time: "This $9 thrift-store
-     lazy Susan looks like a $380 stone counter riser" beats "I made an amazing
-     upgrade for cheap."
+     transformation for a project, or a concrete mistake or result for a
+     list/guide post — a specific, concrete curiosity gap (what it actually
+     is, not "you won't believe this"). Never use a price or any dollar
+     amount. Specific and unexpected beats generic every time: "This
+     thrift-store lazy Susan looks like a stone counter riser" beats "I
+     made an amazing upgrade for cheap."
   2. 2 short, concrete tip/step sentences pulled from the real project — the
      single most surprising or useful specific detail (the trick, the
      material swap, the exact technique), not a generic summary. In ONE of
-     these, naturally mention the total cost and time using the actual
-     numbers (e.g. "It only takes about an hour and costs around $20.") — write
-     dollar amounts as "$20" (not spelled out); the TTS voice reads these
-     correctly, and it lets the on-screen caption highlight the price.
+     these, naturally mention how long it takes (e.g. "It only takes about an hour."). Never mention a price.
   Write it like natural spoken American English: short punchy sentences,
   contractions, no filler, no markdown, no quotation marks inside the
   string. Every sentence should earn its place — cut anything that doesn't
@@ -1454,7 +1399,6 @@ Return ONLY valid JSON. No markdown fences, no commentary before or after.
   "pin_description": "...",
   "pin_hook": "...",
   "hashtag_tags": ["8-12 short descriptive style/content tags for Pinterest/Tumblr hashtags only, e.g. thrift flip, diy, budget decor, home makeover, thrifted finds — these do NOT affect the site's category"],
-  "total_cost": "e.g. $26",
   "time_estimate": "e.g. 1 hour",
   "difficulty": "Easy, Moderate, or Advanced",
   "faq": [
@@ -1640,11 +1584,6 @@ def normalize_draft(draft):
     if not draft.get("pin_hook"):
         warn("pin_hook", "the title")
         draft["pin_hook"] = draft["title"]
-    # a missing dollar sign made one cover read "UNDER 35": "under 35" -> "under $35"
-    draft["pin_hook"] = re.sub(
-        r"\b(under|below|less than)\s+(\d+(?:\.\d+)?)\b(?!\s*(?:min|hour|hr|day|week|step|way|tip|idea|item|piece))",
-        r"\1 $\2", draft["pin_hook"], flags=re.IGNORECASE)
-
     # Optional: Pinterest-search description. If missing/malformed, the old
     # behavior (excerpt of the opening paragraph) is used instead.
     if not isinstance(draft.get("pin_description"), str):
@@ -1672,7 +1611,7 @@ def normalize_draft(draft):
         draft["section_images"] = [
             s for s in draft["section_images"]
             if isinstance(s, dict) and s.get("query")
-        ]
+        ][:2]   # at most two section photos (plus the hero)
 
     if draft.get("category") not in CATEGORIES:
         warn("category", "'General Decor'")
@@ -1685,7 +1624,6 @@ def normalize_draft(draft):
         draft["hashtag_tags"] = [str(t) for t in draft["hashtag_tags"] if t]
 
     for field, fallback in [
-        ("total_cost", "See breakdown below"),
         ("time_estimate", "A weekend"),
         ("difficulty", "Easy"),
     ]:
@@ -2561,10 +2499,70 @@ def title_case_if_needed(title):
     return " ".join(out)
 
 
+PRICE_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?")
+_PRICE_PHRASE_RE = re.compile(
+    r"(?:\s*,)?(?:\s+(?:for|at|about|around|roughly|approximately|only|just|under|less than|over|up to|costs?|costing|worth|between|from))*"
+    r"\s*\$\s?\d[\d,]*(?:\.\d+)?(?:\s*(?:-|–|—|to|and)\s*\$?\s?\d[\d,]*(?:\.\d+)?)?"
+    r"(?:\s+(?:each|per\s+\w+|total|in total|apiece|or less|or more))*", re.IGNORECASE)
+
+
+def _strip_price_phrases(text):
+    """Cuts price phrases out of a short piece of text ("(one roll, about $12)" -> "(one roll)")."""
+    t = _PRICE_PHRASE_RE.sub("", text or "")
+    t = re.sub(r"\s*\(\s*[,;]?\s*\)", "", t)
+    t = re.sub(r"\s+([,.;:!?])", r"\1", t)
+    t = re.sub(r"\s{2,}", " ", t).strip(" ,;")
+    if re.fullmatch(r"(?i)(about|around|roughly|approximately|only|just|under|less than|over|for|at|total|costs?|between|from)[.!?]?", t):
+        return ""   # nothing but a leftover connecting word
+    return t
+
+
+def _drop_price_sentences(text):
+    """Removes every sentence that contains a price (used for running text, where cutting out just the
+    number would leave a broken sentence)."""
+    sentences = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+    return " ".join(x for x in sentences if not PRICE_RE.search(x))
+
+
+def strip_prices(draft):
+    """
+    Prices are not allowed anywhere (they change all the time, and every total was a chance for a mistake). The
+    prompt says so; this is the safety net: tables are removed, sentences and list items with a price are cleaned,
+    and the pin / FAQ / video texts lose theirs. A price in the TITLE cannot be cleaned and is rejected by the gate.
+    """
+    html_text = re.sub(r"<table\b.*?</table>", "", draft.get("html", "") or "", flags=re.DOTALL | re.IGNORECASE)
+
+    def fix_p(m):
+        kept = _drop_price_sentences(m.group(2))
+        return f"{m.group(1)}{kept}{m.group(3)}" if kept else ""
+
+    def fix_short(m):
+        cleaned = _strip_price_phrases(m.group(2))
+        return f"{m.group(1)}{cleaned}{m.group(3)}" if cleaned else ""   # an item that was only a price disappears
+
+    html_text = re.sub(r"(<p\b[^>]*>)(.*?)(</p>)", fix_p, html_text, flags=re.DOTALL)
+    html_text = re.sub(r"(<(?:li|h2|h3|blockquote)\b[^>]*>)(.*?)(</(?:li|h2|h3|blockquote)>)", fix_short, html_text, flags=re.DOTALL)
+    draft["html"] = html_text
+    for field in ("pin_description", "pin_hook"):
+        if isinstance(draft.get(field), str):
+            draft[field] = _strip_price_phrases(draft[field])
+    if not draft.get("pin_hook"):
+        draft["pin_hook"] = draft.get("title", "")
+    if isinstance(draft.get("reel_script"), str):
+        script = _drop_price_sentences(draft["reel_script"])
+        draft["reel_script"] = script or f"{draft.get('pin_hook') or draft.get('title', '')}. Here's how to get the look on a budget."
+    for item in draft.get("faq") or []:
+        if isinstance(item, dict):
+            item["question"] = _strip_price_phrases(str(item.get("question", "")))
+            answer = _drop_price_sentences(str(item.get("answer", "")))
+            item["answer"] = answer or "It depends on the materials you choose, so check what you already have first."
+    draft["total_cost"] = ""
+
+
 def finalize_draft_text(draft):
     """Everything that must be true of the text no matter what the model wrote: totals from the table, short paragraphs."""
     draft["title"] = title_case_if_needed(draft.get("title", ""))
-    fix_listicle_cost(draft)
+    strip_prices(draft)
     draft["html"] = split_long_paragraphs(draft.get("html", ""))
 
 
@@ -3346,7 +3344,7 @@ def post_to_tumblr(title, intro, total_cost, time_estimate, difficulty,
             {"type": "text", "text": f"✨ {title} ✨", "subtype": "heading1"},
             {"type": "text", "text": intro},
             {"type": "text", "text": "Quick Take:", "subtype": "heading2"},
-            {"type": "text", "text": f"💰 Cost: {total_cost}", "subtype": "unordered-list-item"},
+            *([{"type": "text", "text": f"💰 Cost: {total_cost}", "subtype": "unordered-list-item"}] if total_cost else []),
             {"type": "text", "text": f"⏱️ Time: {time_estimate}", "subtype": "unordered-list-item"},
             {"type": "text", "text": f"📊 Difficulty: {difficulty}", "subtype": "unordered-list-item"},
             {"type": "link", "url": link, "display_url": link,
@@ -3420,7 +3418,7 @@ def count_words(html_text):
     return len(re.sub(r"<[^>]+>", " ", html_text or "").split())
 
 
-def build_expansion_prompt(draft, target_words=650):
+def build_expansion_prompt(draft, target_words=480):
     """The task for a draft that is only slightly too short: make the SAME article longer with NEW detail."""
     fields = {k: v for k, v in draft.items() if not str(k).startswith("_")}
     words = count_words(draft.get("html", ""))
@@ -3429,11 +3427,11 @@ def build_expansion_prompt(draft, target_words=650):
                     f"paragraphs you add.\n" if entry else "")
     return (
         f"You are editing a draft blog article that is too short: its html has about {words} words. Bring it to "
-        f"about {target_words} words (at least 620, never more than {target_words + 70}).\n\n"
+        f"about {target_words} words (at least 420, never more than {target_words + 70}).\n\n"
         "Return the SAME article as one JSON object with EXACTLY the same fields, the same title and category, the same "
         "faq, pin fields, image_prompt and section_images, but with a longer \"html\".\n\n"
         "Rules:\n"
-        "- Keep every existing section, price and number unchanged, and keep every [[IMG_n]] placeholder exactly where it is.\n"
+        "- Keep every existing section and number unchanged, and keep every [[IMG_n]] placeholder exactly where it is.\n"
         f"- Add about {max(target_words - words, 120)} NEW words inside at least 3 of the existing sections: exact "
         "measurements and quantities, what to buy and what to skip, a common mistake and how to fix it, a cheaper swap, "
         "a variation, or how to care for the finished piece. Put the new detail into SHORT paragraphs (2-4 sentences, "
@@ -3441,7 +3439,7 @@ def build_expansion_prompt(draft, target_words=650):
         "- NEVER repeat or restate anything already in the article: no recap, no extra \"step-by-step\" list that repeats "
         "the sections above, no same tip twice in different words.\n"
         + subject_rule +
-        "- Keep the html structure (h2/h3/p/ul/ol/table). No brand or store names. No claims of personal experience "
+        "- Keep the html structure (h2/h3/p/ul/ol; no tables). Never write a price or any dollar amount. No brand or store names. No claims of personal experience "
         "(never \"I tried\", \"in my home\"); speak to the reader.\n"
         "- Output ONLY the JSON object, with every html attribute value in single quotes.\n\n"
         "DRAFT:\n" + json.dumps(fields, ensure_ascii=False)
@@ -3465,7 +3463,7 @@ def expand_short_draft(draft, niche, history, problems):
     current = draft
     for pass_no in (1, 2, 3):
         words = count_words(current.get("html", ""))
-        if words < 250:
+        if words < 200:
             break
         print(f"Draft '{draft['title']}' is only {words} words - asking for a longer version of the same article "
               f"(new detail, no repeats), pass {pass_no}/3...")
@@ -3589,7 +3587,7 @@ def main():
         # just draws plain text); escaped versions go into the HTML box.
         plain_word_count = len(re.sub(r"<[^>]+>", " ", draft["html"]).split())
         reading_minutes = max(1, round(plain_word_count / 200))
-        total_cost_raw = draft["total_cost"]
+        total_cost_raw = draft.get("total_cost", "") or ""
         time_estimate_raw = draft["time_estimate"]
         difficulty_raw = draft["difficulty"]
         total_cost = html.escape(total_cost_raw)
@@ -3842,7 +3840,7 @@ def main():
         quick_take_html = (
             '<div style="background:#f7f3ee;border-left:4px solid #b08d57;'
             'padding:15px 20px;margin:15px 0;border-radius:6px;">'
-            f'<strong>Quick Take:</strong> Total cost: {total_cost} &bull; '
+            f'<strong>Quick Take:</strong> {("Total cost: " + total_cost + " &bull; ") if total_cost else ""}'
             f'Time: {time_estimate} &bull; Difficulty: {difficulty} &bull; '
             f'{reading_minutes} min read</div>'
         )
@@ -4044,7 +4042,7 @@ description=extract_pin_description(
     tumblr_ok = post_to_tumblr(
         title=draft["title"],
         intro=social_description,
-        total_cost=draft["total_cost"],
+        total_cost=draft.get("total_cost", ""),
         time_estimate=draft["time_estimate"],
         difficulty=draft["difficulty"],
         image_url=hero_url,
