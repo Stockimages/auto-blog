@@ -1,26 +1,24 @@
-"""
-Fully automatic Blogger publisher for a budget home-decor blog.
-
-Flow each run:
-  1. Read topics_history.json (titles + urls) so Gemini doesn't repeat itself
-     and can link to relevant older posts of ours
-  2. Ask Gemini for: topic, full article (with internal links + a budget
-     table + section-image placeholders), a Pinterest hook, a hero image
-     search query, and a search query for each in-article section image
-  3. Fetch a vertical hero photo from Pexels (for Pinterest) + a horizontal
-     photo per section (for the article body)
-  4. Overlay a bold Pinterest-style text hook on the hero image only
-  5. Commit all images to this repo (so they get public raw.githubusercontent.com URLs)
-  6. Swap the section-image placeholders in the HTML for real <img> tags
-  7. Get a fresh Blogger access token from the stored refresh token
-  8. Publish the post to Blogger
-  9. Save this post's title + URL into history (for future internal linking)
-  10. Get a fresh Pinterest access token from the stored refresh token
-  11. Create a Pin on Pinterest pointing back to the new post
-
-Meant to be run by the GitHub Actions workflow in .github/workflows/auto-blog.yml,
-on a schedule, with no human interaction.
-"""
+# Fully automatic Blogger publisher for a budget home-decor blog.
+#
+# Flow each run:
+#   1. Read topics_history.json (titles + urls) so Gemini doesn't repeat itself
+#      and can link to relevant older posts of ours
+#   2. Ask Gemini for: topic, full article (with internal links + a budget
+#      table + section-image placeholders), a Pinterest hook, a hero image
+#      search query, and a search query for each in-article section image
+#   3. Fetch a vertical hero photo from Pexels (for Pinterest) + a horizontal
+#      photo per section (for the article body)
+#   4. Overlay a bold Pinterest-style text hook on the hero image only
+#   5. Commit all images to this repo (so they get public raw.githubusercontent.com URLs)
+#   6. Swap the section-image placeholders in the HTML for real <img> tags
+#   7. Get a fresh Blogger access token from the stored refresh token
+#   8. Publish the post to Blogger
+#   9. Save this post's title + URL into history (for future internal linking)
+#   10. Get a fresh Pinterest access token from the stored refresh token
+#   11. Create a Pin on Pinterest pointing back to the new post
+#
+# Meant to be run by the GitHub Actions workflow in .github/workflows/auto-blog.yml,
+# on a schedule, with no human interaction.
 
 import os
 import re
