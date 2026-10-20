@@ -501,6 +501,15 @@ def find_quality_problems(draft, min_words=400):
     if re.match(r"^[A-Z][A-Z0-9 \-]{3,}:\s", draft.get("title", "")):
         problems.append("title starts with a capitalised label such as \"BEFORE-AND-AFTER:\"")
 
+    # A numbered title ("5 Myths ...") must not promise more items than the article has (a live post said 5 and had 4).
+    m = re.match(r"\s*(\d{1,2})\b", draft.get("title", "") or "")
+    if m and draft.get("_format") in NUMBERED_FORMATS and 3 <= int(m.group(1)) <= 12:
+        n = int(m.group(1))
+        html_text = draft.get("html", "") or ""
+        headings = len(re.findall(r"<h[23]\b", html_text))
+        list_items = max((len(re.findall(r"<li\b", blk)) for blk in re.findall(r"<(?:ol|ul)\b.*?</(?:ol|ul)>", html_text, flags=re.DOTALL)), default=0)
+        if max(headings, list_items) < n:
+            problems.append(f"the title promises {n} items but the article has only {max(headings, list_items)}")
     # No prices anywhere (they change all the time and every total was a place for a mistake). The text is cleaned
     # by strip_prices(); a price that is still in the TITLE cannot be cleaned, so such a draft is rejected.
     if PRICE_RE.search(draft.get("title", "")):
@@ -997,8 +1006,10 @@ _GENERIC_SUBJECT_WORDS = {"above", "around", "setup", "accents", "corner", "fres
                           "space", "area", "storage", "display", "styling", "styled", "setting", "spots", "bedroom"}
 
 
+NUMBERED_FORMATS_EXTRA = {"myth-busting"}
 LIST_FORMATS = {"listicle", "quick fixes under an hour", "renter-friendly ideas", "small space solutions", "seasonal checklist",
                 "diy gift ideas", "thrift shopping list", "splurge or save", "decor rules", "mistakes and fixes"}
+NUMBERED_FORMATS = LIST_FORMATS | NUMBERED_FORMATS_EXTRA
 
 
 def subject_followed(draft):
@@ -1228,8 +1239,9 @@ CONSISTENCY RULES (readers notice contradictions, so check these before you answ
   and the cut lengths must add up to something that can really be built.
 
 SAFETY: never suggest mixing cleaning chemicals (for example bleach with vinegar or ammonia). If a step uses
-oil-soaked rags (linseed or tung oil), spray paint, solvents or heat, add one short safety line (ventilate the
-room; lay oily rags flat to dry, or soak them in water, before throwing them away). Never claim that a paint
+oil-soaked rags (linseed or tung oil, oil-based stain, polyurethane or varnish), spray paint, solvents or heat, add
+one short safety line (ventilate the room; lay oily rags flat to dry, or soak them in water, before throwing them
+away). Whenever a lit candle is part of an idea, add a short line to never leave it burning unattended. Never claim that a paint
 or finish is food-safe.
 Anything with flames or real heat (fire pits, fireplaces, space heaters, candles near fabric): only suggest
 fire-safe materials (fire brick, lava rock, metal rings made for fire) and never river rock, pea gravel, wet stones,
