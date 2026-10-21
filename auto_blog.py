@@ -1036,6 +1036,18 @@ def subject_followed(draft):
     return count >= 3 or (title_has and count >= 2)
 
 
+def pick_item_count(history):
+    """How many items a list-style post gets (3, 4, 5 or 6). The model always took the first number of a range ("5-6"),
+    so nearly every title started with 5; now the script chooses, avoiding the numbers of the last 3 posts."""
+    recent = set()
+    for h in history[-3:]:
+        m = re.match(r"\s*(\d{1,2})\b", (h.get("title") or ""))
+        if m:
+            recent.add(int(m.group(1)))
+    pool = [n for n in (3, 4, 5, 6) if n not in recent] or [3, 4, 5, 6]
+    return random.choice(pool)
+
+
 def pick_subject(history, today=None):
     """
     Returns the (id, keywords, phrase) of the subject used least so far among those that fit the current
@@ -1114,7 +1126,7 @@ def pick_post_plan(history, today=None):
     style = random.choice(STYLE_LENSES) if random.random() < 0.5 else None
     style_line = (
         f"STYLE LENS (optional flavor): lean into {style} style where it fits naturally; "
-        f"don't force it." if style else ""
+        f"mention it in at most one short sentence and never force it (skip it if it clashes with the subject or the season)." if style else ""
     )
     angle = None
     if random.random() < 0.6:
@@ -1157,6 +1169,11 @@ def generate_draft(history, niche, expand_from=None):
     plan = pick_post_plan(history)
     fmt = plan["fmt"]
     subject = None if expand_from else pick_subject(history)   # (id, keywords, phrase)
+    format_instruction = fmt["instruction"]
+    if not expand_from and fmt["name"] in NUMBERED_FORMATS:
+        item_count = pick_item_count(history)
+        format_instruction = (re.sub(r"\b[3-7]-[4-9]\b", str(item_count), format_instruction)
+                              + f" Write exactly {item_count} items, and if the title starts with a number it must be {item_count}.")
     if subject:
         subject_block = (
             "SUBJECT FOR THIS POST (fixed by the system so it cannot repeat an older post): " + subject[2] + ".\n"
@@ -1220,7 +1237,7 @@ NO BRANDS (important — a post with brand names was removed by Blogger):
 HONESTY RULES (important):
 - Do NOT claim experiences that didn't happen: no "I tried", "I spent", "in my
   home", "my husband", "when I made this". Speak to the reader ("you") or in
-  general terms ("most people find...", "a common mistake is...").
+  general terms ("most people find...").
 - NEVER write a price, a dollar amount, a cost range, a total or a budget figure anywhere in the post: not in
   the title, the text, the lists, the FAQ, the pin text or the video script. Prices change all the time and the
   numbers are where mistakes happen. Use words instead: budget-friendly, cheap, thrifted, inexpensive.
@@ -1264,7 +1281,7 @@ unusual hybrid that no stock photo would show (for example a leather-wrapped
 glass lantern).
 
 POST FORMAT for THIS post (required — the site was turning into many near-identical
-tutorials, so this post MUST follow this format): {fmt["name"].upper()}: {fmt["instruction"]}
+tutorials, so this post MUST follow this format): {fmt["name"].upper()}: {format_instruction}
 
 {plan["season_line"]}
 {plan["style_line"]}
@@ -1305,11 +1322,13 @@ sure is correct. If you are not sure about a detail, leave it out.
 PARAGRAPHS: keep every paragraph to 2-4 short sentences (about 60 words at most). Never write one long
 block of text; put lists of tips into <ul> or <ol> items instead.
 
+VARY YOUR WORDING: do not open tips with "A common mistake" or "A cheaper swap"; say it a different way each time.
+
 NO REPEATING TO REACH THE LENGTH: never restate something you already said. Do not end with a
 recap, a "step-by-step process" list or a "quick steps" summary that repeats the sections above,
 and do not say the same tip twice in different words. If the article is short of 400 words,
 add NEW, specific detail instead: exact measurements and quantities, what to buy and what to
-skip, a common mistake and how to fix it, a cheaper swap, a variation, or how to care for the
+skip, something that goes wrong and how to fix it, a variation, a small comfort or safety tip, or how to care for the
 finished piece.
 
 STRUCTURE (as HTML, using ONLY these tags: p, h2, h3, ul, ol, li, strong, blockquote, a; no tables):
@@ -3443,9 +3462,10 @@ def build_expansion_prompt(draft, target_words=480):
         "Rules:\n"
         "- Keep every existing section and number unchanged, and keep every [[IMG_n]] placeholder exactly where it is.\n"
         f"- Add about {max(target_words - words, 120)} NEW words inside at least 3 of the existing sections: exact "
-        "measurements and quantities, what to buy and what to skip, a common mistake and how to fix it, a cheaper swap, "
-        "a variation, or how to care for the finished piece. Put the new detail into SHORT paragraphs (2-4 sentences, "
+        "measurements and quantities, what to buy and what to skip, something that goes wrong and how to fix it, "
+        "a variation, a small comfort or safety tip, or how to care for the finished piece. Put the new detail into SHORT paragraphs (2-4 sentences, "
         "about 60 words at most) or list items, never into one long block.\n"
+        "- Vary your wording: never open a tip with \"A common mistake\" or \"A cheaper swap\" (every post was using those phrases).\n"
         "- NEVER repeat or restate anything already in the article: no recap, no extra \"step-by-step\" list that repeats "
         "the sections above, no same tip twice in different words.\n"
         + subject_rule +
