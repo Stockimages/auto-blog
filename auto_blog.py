@@ -93,9 +93,6 @@ FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
 INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID")
 INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
-TIKTOK_CLIENT_KEY = os.environ.get("TIKTOK_CLIENT_KEY")
-TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
-TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
 
 CATEGORY_EMOJIS = {
     "Living Room": "🛋️", "Bedroom": "🛏️", "Kitchen": "🍽️", "Bathroom": "🛁",
@@ -3423,80 +3420,6 @@ STATUS_FILE = "status.json"
 
 
 
-def get_tiktok_access_token():
-    """Refresh token -> fresh access token. TikTok rotates refresh tokens, so a
-    new one (if returned) is saved back to GitHub Secrets."""
-    res = requests.post(
-        "https://open.tiktokapis.com/v2/oauth/token/",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data={"client_key": TIKTOK_CLIENT_KEY, "client_secret": TIKTOK_CLIENT_SECRET,
-              "grant_type": "refresh_token", "refresh_token": TIKTOK_REFRESH_TOKEN},
-        timeout=30,
-    )
-    data = res.json()
-    if "access_token" not in data:
-        raise RuntimeError(f"TikTok token refresh failed: {data}")
-    new_refresh = data.get("refresh_token")
-    if new_refresh and new_refresh != TIKTOK_REFRESH_TOKEN:
-        try:
-            update_github_secret("TIKTOK_REFRESH_TOKEN", new_refresh)
-        except Exception as e:
-            print(f"[TikTok] WARNING: could not save rotated refresh token: {e}")
-    return data["access_token"]
-
-
-def post_to_tiktok(video_bytes, title):
-    """Direct-post a vertical video to TikTok. Never raises; returns True/False."""
-    if not (TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET and TIKTOK_REFRESH_TOKEN):
-        print("[TikTok] credentials not set - skipping.")
-        return False
-    try:
-        token = get_tiktok_access_token()
-        size = len(video_bytes)
-        init = requests.post(
-            "https://open.tiktokapis.com/v2/post/publish/video/init/",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={
-                "post_info": {"title": title[:150], "privacy_level": "PUBLIC_TO_EVERYONE",
-                              "disable_duet": False, "disable_comment": False, "disable_stitch": False},
-                "source_info": {"source": "FILE_UPLOAD", "video_size": size,
-                                "chunk_size": size, "total_chunk_count": 1},
-            },
-            timeout=60,
-        ).json()
-        if "data" not in init or not init["data"].get("upload_url"):
-            print(f"[TikTok] init failed: {init}")
-            return False
-        publish_id = init["data"]["publish_id"]
-        up = requests.put(
-            init["data"]["upload_url"],
-            headers={"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{size - 1}/{size}"},
-            data=video_bytes, timeout=300,
-        )
-        if up.status_code not in (200, 201, 206):
-            print(f"[TikTok] upload failed ({up.status_code}): {up.text[:300]}")
-            return False
-        for _ in range(10):
-            time.sleep(6)
-            st = requests.post(
-                "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"publish_id": publish_id}, timeout=30,
-            ).json()
-            status = st.get("data", {}).get("status")
-            print(f"[TikTok] status: {status}")
-            if status == "PUBLISH_COMPLETE":
-                return True
-            if status == "FAILED":
-                print(f"[TikTok] failed: {st}")
-                return False
-        print("[TikTok] still processing after polling - assuming OK.")
-        return True
-    except Exception as e:
-        print(f"[TikTok] error: {e}")
-        return False
-
-
 def build_pin_hashtags(labels, max_tags=5):
     """Turns article labels into hashtags, e.g. 'thrift flip' -> '#ThriftFlip'."""
     tags = []
@@ -3923,7 +3846,7 @@ def send_phone_notification(subject, body):
 
 
 def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False,
-                facebook_ok=None, instagram_ok=None, tiktok_ok=None):
+                facebook_ok=None, instagram_ok=None):
     """
     Writes a small status.json the control panel reads to show a simple
     green-tick/red-cross per platform for the most recent run. Facebook,
@@ -3937,7 +3860,7 @@ def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False,
         "tumblr": {"success": tumblr_ok, "timestamp": now},
         "facebook": {"success": facebook_ok, "timestamp": now},
         "instagram": {"success": instagram_ok, "timestamp": now},
-        "tiktok": {"success": tiktok_ok, "timestamp": now},
+        "tiktok": {"success": None, "timestamp": now},
     }
     with open(STATUS_FILE, "w") as f:
         json.dump(status, f, indent=2)
@@ -4574,7 +4497,6 @@ def main():
     category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
     facebook_ok = False
     instagram_ok = False
-    tiktok_ok = False
     fb_message = (
         f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
         f"👉 Visit our website for the full guide!\n\n{tumblr_hashtags}"
@@ -4601,9 +4523,6 @@ def main():
             print("Skipping Facebook + Instagram - see the health check message above.")
     except Exception as e:
         print(f"Facebook/Instagram step failed (blog post is still published fine): {e}")
-    if RUN_TYPE == "video" and reel_video_bytes:
-        print("Posting to TikTok...")
-        tiktok_ok = post_to_tiktok(reel_video_bytes, f"{pin_hook} {draft['title']} {tumblr_hashtags}")
 
     # Pinterest is posted last and wrapped in try/except on purpose: if this
     # fails for any reason, the Blogger post has already gone live and should
@@ -4659,7 +4578,7 @@ description=extract_pin_description(
     boost_indexing(post_url, bing_ok, history)
 
     save_status(blogger_ok=True, blogger_url=post_url, pinterest_ok=pinterest_ok, tumblr_ok=tumblr_ok,
-                facebook_ok=facebook_ok, instagram_ok=instagram_ok, tiktok_ok=tiktok_ok)
+                facebook_ok=facebook_ok, instagram_ok=instagram_ok)
     print("Committing history + status...")
     commit_paths = [HISTORY_FILE, STATUS_FILE]
     if os.path.exists(BING_BACKLOG_FILE):
@@ -4676,8 +4595,7 @@ description=extract_pin_description(
         f"Facebook: {tick(facebook_ok)}\n"
         f"Instagram: {tick(instagram_ok)}\n"
         f"Pinterest: {tick(pinterest_ok)}\n"
-        f"Tumblr: {tick(tumblr_ok)}\n"
-        f"TikTok: {tick(tiktok_ok)}\n\n"
+        f"Tumblr: {tick(tumblr_ok)}\n\n"
         f"Article: {article_info}",
     )
 
