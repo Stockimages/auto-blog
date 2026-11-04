@@ -658,7 +658,13 @@ def synthesize_gemini_voiceover(text, out_path, api_key, voice=None, models=None
         m for m in (os.environ.get("GEMINI_TTS_MODEL"), "gemini-3.8-flash-tts",
                     "gemini-3.8-flash-lite-tts") if m
     ))
-    prompt = "Read this as a warm, light, friendly voiceover at a relaxed, natural pace: " + text
+    # Style is given in Google's documented "Say <style>: <text>" form, with a short
+    # directive. The old long sentence ("Read this as a warm, light, friendly voiceover
+    # at a relaxed, natural pace: ...") was sometimes spoken aloud by the model as if it
+    # were part of the script. Override with GEMINI_TTS_STYLE (set it to "none" for no
+    # style line at all - the Zephyr voice is already bright and friendly by itself).
+    style = os.environ.get("GEMINI_TTS_STYLE", "Say warmly and naturally").strip()
+    prompt = text if style.lower() in ("", "none") else f"{style}: {text}"
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
