@@ -89,6 +89,18 @@ TUMBLR_CONSUMER_SECRET = os.environ.get("TUMBLR_CONSUMER_SECRET")
 TUMBLR_ACCESS_TOKEN = os.environ.get("TUMBLR_ACCESS_TOKEN")
 TUMBLR_ACCESS_TOKEN_SECRET = os.environ.get("TUMBLR_ACCESS_TOKEN_SECRET")
 TUMBLR_BLOG_NAME = os.environ.get("TUMBLR_BLOG_NAME")
+FACEBOOK_PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID")
+FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN")
+INSTAGRAM_ACCOUNT_ID = os.environ.get("INSTAGRAM_ACCOUNT_ID")
+INSTAGRAM_ACCESS_TOKEN = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+TIKTOK_CLIENT_KEY = os.environ.get("TIKTOK_CLIENT_KEY")
+TIKTOK_CLIENT_SECRET = os.environ.get("TIKTOK_CLIENT_SECRET")
+TIKTOK_REFRESH_TOKEN = os.environ.get("TIKTOK_REFRESH_TOKEN")
+
+CATEGORY_EMOJIS = {
+    "Living Room": "🛋️", "Bedroom": "🛏️", "Kitchen": "🍽️", "Bathroom": "🛁",
+    "Small Spaces": "📦", "Entryway": "🚪", "Outdoor": "🌿", "General Decor": "🏠",
+}
 
 # Phone notification (via Gmail App Password + SMTP) — sends a summary
 # email to your own inbox after each run, so a push notification shows up
@@ -2997,6 +3009,494 @@ def get_pinterest_access_token():
     return data["access_token"]
 
 
+def check_meta_token_health():
+    """
+    Quick pre-flight check for the Facebook/Instagram Page Access Token,
+    run before attempting to post. Catches an expired/invalidated token
+    early with a clear, actionable message — instead of only finding out
+    via a buried OAuthException deep in the Facebook/Instagram post calls.
+    """
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("[token health] FACEBOOK_PAGE_ACCESS_TOKEN not set — Facebook/Instagram will be skipped.")
+        return False
+    try:
+        res = requests.get(
+            "https://graph.facebook.com/me",
+            params={"fields": "id,name", "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+            timeout=15,
+        )
+        if res.ok:
+            print(f"[token health] Facebook/Instagram Page token OK ({res.json().get('name')}).")
+            return True
+        print(f"[token health] Facebook/Instagram Page token looks INVALID: {res.text}")
+        print("[token health] Fix: Graph API Explorer -> generate a new User Token with the usual "
+              "7 permissions -> Extend Access Token in the Access Token Debugger -> "
+              "run me/accounts?fields=name,access_token,instagram_business_account with that extended "
+              "token -> copy the returned access_token into BOTH FACEBOOK_PAGE_ACCESS_TOKEN and "
+              "INSTAGRAM_ACCESS_TOKEN secrets.")
+        return False
+    except Exception as e:
+        print(f"[token health] Could not verify Facebook/Instagram token: {e}")
+        return False
+
+
+def post_to_facebook_page(message, image_url, link):
+    """
+    Posts a native photo to the Facebook Page (reusing the same 4:5 image
+    made for Instagram — also Facebook's own recommended feed ratio as of
+    2026), then adds the blog link as a follow-up comment. `message`
+    (built by the caller) uses a plain CTA phrase rather than the raw URL,
+    since a literal link in the caption text costs organic reach even
+    without using the API's "link" field — the actual clickable URL lives
+    only in the comment, which is guaranteed visible since it's the post's
+    first (usually only) comment, even though programmatically PINNING a
+    comment isn't reliably supported by the Graph API.
+    Never raises — if this fails or isn't configured, the post is still
+    published everywhere else fine. Returns True/False for the dashboard.
+    """
+    if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook post.")
+        return False
+
+    try:
+        res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/photos",
+            data={
+                "url": image_url,
+                "caption": message,
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+        if not res.ok:
+            print(f"Facebook post failed ({res.status_code}): {res.text}")
+            return False
+
+        result = res.json()
+        post_id = result.get("post_id") or result.get("id")
+        print("Posted to Facebook:", post_id)
+
+        # Also add the link as a comment — wrapped separately so a comment
+        # failure doesn't undo the fact that the photo post itself (with
+        # the link already in its caption) already succeeded.
+        try:
+            comment_res = robust_request(
+                "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                timeout=30,
+            )
+            if comment_res.ok:
+                print("Added link comment:", comment_res.json().get("id"))
+            else:
+                print(f"Facebook link-comment failed ({comment_res.status_code}): {comment_res.text}")
+        except Exception as e:
+            print(f"Facebook link-comment failed (post itself is still published fine): {e}")
+
+        return True
+    except Exception as e:
+        print(f"Facebook post failed (blog post is still published fine): {e}")
+        return False
+
+
+def post_to_tumblr(title, intro, total_cost, time_estimate, difficulty,
+                    image_url, link, hashtags):
+    """
+    Posts a richly-formatted native post to the Tumblr blog via Tumblr's
+    official OAuth 1.0a API, using proper Neue Post Format blocks (heading,
+    paragraph, a bulleted "Quick Take" checklist, a styled link block, and
+    hashtags) instead of one flat text blob — matches how well-performing
+    decor/DIY Tumblr accounts structure their posts.
+    Never raises — if this fails or isn't configured, the post is still
+    published everywhere else fine.
+    """
+    if not all([TUMBLR_CONSUMER_KEY, TUMBLR_CONSUMER_SECRET,
+                TUMBLR_ACCESS_TOKEN, TUMBLR_ACCESS_TOKEN_SECRET, TUMBLR_BLOG_NAME]):
+        print("Tumblr credentials not fully set — skipping Tumblr post.")
+        return False
+
+    try:
+        oauth = OAuth1Session(
+            TUMBLR_CONSUMER_KEY,
+            client_secret=TUMBLR_CONSUMER_SECRET,
+            resource_owner_key=TUMBLR_ACCESS_TOKEN,
+            resource_owner_secret=TUMBLR_ACCESS_TOKEN_SECRET,
+        )
+        content = [
+            {"type": "image", "media": [{"url": image_url}]},
+            {"type": "text", "text": f"✨ {title} ✨", "subtype": "heading1"},
+            {"type": "text", "text": intro},
+            {"type": "text", "text": "Quick Take:", "subtype": "heading2"},
+            {"type": "text", "text": f"💰 Cost: {total_cost}", "subtype": "unordered-list-item"},
+            {"type": "text", "text": f"⏱️ Time: {time_estimate}", "subtype": "unordered-list-item"},
+            {"type": "text", "text": f"📊 Difficulty: {difficulty}", "subtype": "unordered-list-item"},
+            {"type": "link", "url": link, "display_url": link,
+             "title": "Read the Full Post on DecorVibe"},
+            {"type": "text", "text": hashtags},
+        ]
+        res = oauth.post(
+            f"https://api.tumblr.com/v2/blog/{TUMBLR_BLOG_NAME}/posts",
+            json={"content": content},
+            timeout=30,
+        )
+        if res.ok:
+            print("Posted to Tumblr:", res.json().get("response", {}).get("id"))
+            return True
+        else:
+            print(f"Tumblr post failed ({res.status_code}): {res.text}")
+            return False
+    except Exception as e:
+        print(f"Tumblr post failed (blog post is still published fine): {e}")
+        return False
+def post_facebook_video(description, video_url, link):
+    """
+    Posts a native video to the Facebook Page (used only for RUN_TYPE=video
+    runs) — this is a plain video post, NOT the clickable link-card that
+    post_to_facebook_page() makes, so it's posted as an ADDITIONAL post
+    alongside the usual link post rather than replacing it, to avoid losing
+    the click-through traffic the link card drives. Also adds the blog link
+    as a comment (same as the image-mode post), since a native video post's
+    description text isn't clickable either.
+    Never raises — returns True/False for the dashboard.
+    """
+    if not FACEBOOK_PAGE_ID or not FACEBOOK_PAGE_ACCESS_TOKEN:
+        print("FACEBOOK_PAGE_ID / FACEBOOK_PAGE_ACCESS_TOKEN not set — skipping Facebook video post.")
+        return False
+    try:
+        res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{FACEBOOK_PAGE_ID}/videos",
+            data={
+                "file_url": video_url,
+                "description": description,
+                "access_token": FACEBOOK_PAGE_ACCESS_TOKEN,
+            },
+            timeout=120,
+        )
+        if not res.ok:
+            print(f"Facebook video post failed ({res.status_code}): {res.text}")
+            return False
+
+        post_id = res.json().get("id")
+        print("Posted Facebook video:", post_id)
+
+        # Also add the link as a comment — wrapped separately so a comment
+        # failure doesn't undo the fact that the video post itself already
+        # succeeded. Native video posts process ASYNCHRONOUSLY on
+        # Facebook's side (the id above comes back before the video is
+        # fully attached to a commentable post), so the very first attempt
+        # can land too early and get rejected even though the post is
+        # completely fine — retrying with a short wait fixes that.
+        #
+        # IMPORTANT: this retry must be idempotent. robust_request() already
+        # retries on its own on a network timeout/5xx — and posting a
+        # comment isn't idempotent (each successful POST creates a NEW
+        # comment), so if a POST actually succeeded on Facebook's side but
+        # the response back to us was lost (timeout), a naive retry posts
+        # a SECOND copy. That's exactly what was causing the double-comment
+        # (and, on the runs where every attempt genuinely failed,
+        # missing-comment) inconsistency. So before each retry, check
+        # whether our comment is already there first, instead of just
+        # blindly posting again.
+        comment_posted = False
+        for attempt in range(4):
+            if attempt > 0:
+                wait_s = 10 * attempt  # 10s, 20s, 30s
+                print(f"Checking/retrying link comment in {wait_s}s (attempt {attempt + 1}/4)...")
+                time.sleep(wait_s)
+                try:
+                    existing = robust_request(
+                        "GET", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                        params={"access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                        timeout=30,
+                    )
+                    if existing.ok and any(
+                        c.get("message") == link for c in existing.json().get("data", [])
+                    ):
+                        print("Link comment already present from an earlier attempt — not re-posting.")
+                        comment_posted = True
+                        break
+                except Exception as e:
+                    print(f"Couldn't check for an existing comment ({e}) — trying to post anyway.")
+            try:
+                comment_res = robust_request(
+                    "POST", f"https://graph.facebook.com/v26.0/{post_id}/comments",
+                    data={"message": link, "access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+                    timeout=30,
+                )
+                if comment_res.ok:
+                    print("Added link comment:", comment_res.json().get("id"))
+                    comment_posted = True
+                    break
+                else:
+                    print(f"Facebook video link-comment attempt {attempt + 1} failed "
+                          f"({comment_res.status_code}): {comment_res.text}")
+            except Exception as e:
+                print(f"Facebook video link-comment attempt {attempt + 1} failed: {e}")
+        if not comment_posted:
+            print("Giving up on the Facebook video link comment (video post still published fine).")
+
+        return True
+    except Exception as e:
+        print(f"Facebook video post failed (blog post is still published fine): {e}")
+        return False
+
+
+def post_to_instagram(caption, image_url):
+    """
+    Creates an Instagram media container from a public image URL, then
+    publishes it. Uses the Facebook Graph API with a Page Access Token
+    (non-expiring). Never raises — if this fails or isn't configured, the
+    post is still published everywhere else fine. Returns True/False so the
+    caller can record status for the dashboard.
+    """
+    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
+        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram post.")
+        return False
+
+    try:
+        create_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+            data={
+                "image_url": image_url,
+                "caption": caption,
+                "access_token": INSTAGRAM_ACCESS_TOKEN,
+            },
+            timeout=60,
+        )
+        if not create_res.ok:
+            print(f"Instagram media creation failed ({create_res.status_code}): {create_res.text}")
+            return False
+        creation_id = create_res.json()["id"]
+
+        # Give Instagram a moment to finish processing the image before publishing.
+        time.sleep(10)
+
+        publish_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
+            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if publish_res.ok:
+            print("Posted to Instagram:", publish_res.json().get("id"))
+            return True
+        else:
+            print(f"Instagram publish failed ({publish_res.status_code}): {publish_res.text}")
+            return False
+    except Exception as e:
+        print(f"Instagram post failed (blog post is still published fine): {e}")
+        return False
+
+
+def _create_ig_carousel_child(image_url):
+    """Creates one carousel slide's media container (no caption on children)."""
+    res = robust_request(
+        "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+        data={
+            "image_url": image_url,
+            "is_carousel_item": "true",
+            "access_token": INSTAGRAM_ACCESS_TOKEN,
+        },
+        timeout=60,
+    )
+    if not res.ok:
+        raise RuntimeError(f"Carousel child creation failed ({res.status_code}): {res.text}")
+    return res.json()["id"]
+
+
+def post_to_instagram_carousel(caption, image_urls):
+    """
+    Posts a multi-slide Instagram carousel (2-10 public image URLs). Falls
+    back to a single-image post via post_to_instagram() using the first
+    image if fewer than 2 URLs are given, or if anything in the carousel
+    flow fails — so a carousel hiccup never costs the Instagram post
+    entirely, same philosophy as the rest of this script's social posting.
+    """
+    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
+        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram post.")
+        return False
+
+    if len(image_urls) < 2:
+        return post_to_instagram(caption, image_urls[0]) if image_urls else False
+
+    try:
+        child_ids = []
+        for url in image_urls:
+            child_ids.append(_create_ig_carousel_child(url))
+            time.sleep(2)
+
+        # Let all children finish processing before assembling the carousel.
+        time.sleep(8)
+
+        parent_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+            data={
+                "media_type": "CAROUSEL",
+                "children": ",".join(child_ids),
+                "caption": caption,
+                "access_token": INSTAGRAM_ACCESS_TOKEN,
+            },
+            timeout=60,
+        )
+        if not parent_res.ok:
+            raise RuntimeError(f"Carousel container failed ({parent_res.status_code}): {parent_res.text}")
+        creation_id = parent_res.json()["id"]
+
+        time.sleep(10)
+
+        publish_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
+            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if not publish_res.ok:
+            raise RuntimeError(f"Carousel publish failed ({publish_res.status_code}): {publish_res.text}")
+
+        print("Posted Instagram carousel:", publish_res.json().get("id"))
+        return True
+    except Exception as e:
+        print(f"Instagram carousel failed ({e}), falling back to single-image post...")
+        return post_to_instagram(caption, image_urls[0])
+
+
+def post_instagram_reel(caption, video_url):
+    """
+    Posts a Reel (used only for RUN_TYPE=video runs), replacing the usual
+    carousel for that run. Reels take longer to process than images, so
+    this polls the container's status_code until FINISHED (capped attempts)
+    before publishing, instead of a fixed sleep like the image/carousel
+    paths use. Never raises — returns True/False for the dashboard.
+    """
+    if not INSTAGRAM_ACCOUNT_ID or not INSTAGRAM_ACCESS_TOKEN:
+        print("INSTAGRAM_ACCOUNT_ID / INSTAGRAM_ACCESS_TOKEN not set — skipping Instagram Reel.")
+        return False
+    try:
+        create_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media",
+            data={
+                "media_type": "REELS",
+                "video_url": video_url,
+                "caption": caption,
+                "access_token": INSTAGRAM_ACCESS_TOKEN,
+            },
+            timeout=60,
+        )
+        if not create_res.ok:
+            print(f"Instagram Reel container failed ({create_res.status_code}): {create_res.text}")
+            return False
+        creation_id = create_res.json()["id"]
+
+        # Poll for processing to finish (video takes longer than an image).
+        for attempt in range(15):
+            time.sleep(10)
+            status_res = robust_request(
+                "GET", f"https://graph.facebook.com/v26.0/{creation_id}",
+                params={"fields": "status_code", "access_token": INSTAGRAM_ACCESS_TOKEN},
+                timeout=30,
+            )
+            status_code = status_res.json().get("status_code") if status_res.ok else None
+            print(f"Reel processing status (attempt {attempt + 1}/15): {status_code}")
+            if status_code == "FINISHED":
+                break
+            if status_code == "ERROR":
+                print("Instagram Reel processing failed (ERROR status).")
+                return False
+        else:
+            print("Instagram Reel never finished processing in time — skipping publish.")
+            return False
+
+        publish_res = robust_request(
+            "POST", f"https://graph.facebook.com/v26.0/{INSTAGRAM_ACCOUNT_ID}/media_publish",
+            data={"creation_id": creation_id, "access_token": INSTAGRAM_ACCESS_TOKEN},
+            timeout=60,
+        )
+        if publish_res.ok:
+            print("Posted Instagram Reel:", publish_res.json().get("id"))
+            return True
+        else:
+            print(f"Instagram Reel publish failed ({publish_res.status_code}): {publish_res.text}")
+            return False
+    except Exception as e:
+        print(f"Instagram Reel failed (blog post is still published fine): {e}")
+        return False
+
+
+STATUS_FILE = "status.json"
+
+
+
+def get_tiktok_access_token():
+    """Refresh token -> fresh access token. TikTok rotates refresh tokens, so a
+    new one (if returned) is saved back to GitHub Secrets."""
+    res = requests.post(
+        "https://open.tiktokapis.com/v2/oauth/token/",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={"client_key": TIKTOK_CLIENT_KEY, "client_secret": TIKTOK_CLIENT_SECRET,
+              "grant_type": "refresh_token", "refresh_token": TIKTOK_REFRESH_TOKEN},
+        timeout=30,
+    )
+    data = res.json()
+    if "access_token" not in data:
+        raise RuntimeError(f"TikTok token refresh failed: {data}")
+    new_refresh = data.get("refresh_token")
+    if new_refresh and new_refresh != TIKTOK_REFRESH_TOKEN:
+        try:
+            update_github_secret("TIKTOK_REFRESH_TOKEN", new_refresh)
+        except Exception as e:
+            print(f"[TikTok] WARNING: could not save rotated refresh token: {e}")
+    return data["access_token"]
+
+
+def post_to_tiktok(video_bytes, title):
+    """Direct-post a vertical video to TikTok. Never raises; returns True/False."""
+    if not (TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET and TIKTOK_REFRESH_TOKEN):
+        print("[TikTok] credentials not set - skipping.")
+        return False
+    try:
+        token = get_tiktok_access_token()
+        size = len(video_bytes)
+        init = requests.post(
+            "https://open.tiktokapis.com/v2/post/publish/video/init/",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={
+                "post_info": {"title": title[:150], "privacy_level": "PUBLIC_TO_EVERYONE",
+                              "disable_duet": False, "disable_comment": False, "disable_stitch": False},
+                "source_info": {"source": "FILE_UPLOAD", "video_size": size,
+                                "chunk_size": size, "total_chunk_count": 1},
+            },
+            timeout=60,
+        ).json()
+        if "data" not in init or not init["data"].get("upload_url"):
+            print(f"[TikTok] init failed: {init}")
+            return False
+        publish_id = init["data"]["publish_id"]
+        up = requests.put(
+            init["data"]["upload_url"],
+            headers={"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{size - 1}/{size}"},
+            data=video_bytes, timeout=300,
+        )
+        if up.status_code not in (200, 201, 206):
+            print(f"[TikTok] upload failed ({up.status_code}): {up.text[:300]}")
+            return False
+        for _ in range(10):
+            time.sleep(6)
+            st = requests.post(
+                "https://open.tiktokapis.com/v2/post/publish/status/fetch/",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"publish_id": publish_id}, timeout=30,
+            ).json()
+            status = st.get("data", {}).get("status")
+            print(f"[TikTok] status: {status}")
+            if status == "PUBLISH_COMPLETE":
+                return True
+            if status == "FAILED":
+                print(f"[TikTok] failed: {st}")
+                return False
+        print("[TikTok] still processing after polling - assuming OK.")
+        return True
+    except Exception as e:
+        print(f"[TikTok] error: {e}")
+        return False
+
+
 def build_pin_hashtags(labels, max_tags=5):
     """Turns article labels into hashtags, e.g. 'thrift flip' -> '#ThriftFlip'."""
     tags = []
@@ -3422,7 +3922,8 @@ def send_phone_notification(subject, body):
         print(f"Could not send phone notification (non-fatal): {e}")
 
 
-def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False):
+def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False,
+                facebook_ok=None, instagram_ok=None, tiktok_ok=None):
     """
     Writes a small status.json the control panel reads to show a simple
     green-tick/red-cross per platform for the most recent run. Facebook,
@@ -3434,9 +3935,9 @@ def save_status(blogger_ok, blogger_url, pinterest_ok, tumblr_ok=False):
         "blogger": {"success": blogger_ok, "url": blogger_url, "timestamp": now},
         "pinterest": {"success": pinterest_ok, "timestamp": now},
         "tumblr": {"success": tumblr_ok, "timestamp": now},
-        "facebook": {"success": None, "timestamp": now},
-        "instagram": {"success": None, "timestamp": now},
-        "tiktok": {"success": None, "timestamp": now},
+        "facebook": {"success": facebook_ok, "timestamp": now},
+        "instagram": {"success": instagram_ok, "timestamp": now},
+        "tiktok": {"success": tiktok_ok, "timestamp": now},
     }
     with open(STATUS_FILE, "w") as f:
         json.dump(status, f, indent=2)
@@ -3660,6 +4161,20 @@ def main():
         hero_url = upload_to_r2(hero_filepath)
         print(f"Hero image compressed to {len(hero_compressed) / 1024:.1f} KB")
 
+        # Instagram/Facebook feed image: 4:5 (2:3 is outside Instagram's allowed range).
+        ig_filepath = None
+        ig_image_url = None
+        if RUN_TYPE != "video":
+            try:
+                print("Preparing Instagram/Facebook image (4:5)...")
+                ig_compressed = finalize_pin_image(raw_hero, pin_hook, target_ratio=4 / 5)
+                ig_filepath = os.path.join("images", f"decor-{ts}-instagram.webp")
+                with open(ig_filepath, "wb") as f:
+                    f.write(ig_compressed)
+                ig_image_url = upload_to_r2(ig_filepath)
+            except Exception as e:
+                print(f"4:5 image failed ({e}) - Facebook/Instagram will be skipped this run.")
+
 
         # --- Section images (horizontal, no text overlay, one per placeholder) ---
         section_images = draft.get("section_images", [])
@@ -3692,6 +4207,9 @@ def main():
                 print(f"Section photo for {token} failed, skipping it: {e}")
 
         pin_cover_filepath = None
+        reel_video_bytes = None
+        reel_video_filepath = None
+        reel_video_url = None
         if RUN_TYPE == "video":
             # --- Video-mode: build a narrated vertical video using the
             # SAME real images already generated for the article (hero +
@@ -3802,6 +4320,28 @@ def main():
                 music_path=pick_background_music(),
             )
             print(f"Pinterest video ready ({len(pinterest_video_bytes) / 1024:.0f} KB).")
+
+            # Same slides/voice/music again, but 9:16 for Instagram Reels / Facebook / TikTok.
+            reel_video_bytes = None
+            reel_video_filepath = None
+            reel_video_url = None
+            try:
+                print("Building the 9:16 reel version (Instagram / Facebook / TikTok)...")
+                reel_video_bytes = video_template.build_template_video(
+                    image_specs, audio_path, os.path.join("images", f"reel-work-916-{ts}"),
+                    width=1080, height=1920,
+                    top_text=tpl_top, bottom_text=tpl_bottom, bottom_highlight=tpl_highlight,
+                    music_path=pick_background_music(),
+                )
+                reel_video_filepath = os.path.join("images", f"decor-{ts}-reel.mp4")
+                with open(reel_video_filepath, "wb") as f:
+                    f.write(reel_video_bytes)
+                reel_video_url = upload_to_r2(reel_video_filepath)
+                print(f"9:16 reel ready ({len(reel_video_bytes) / 1024:.0f} KB).")
+            except Exception as e:
+                print(f"9:16 reel build failed ({e}) - Facebook/Instagram/TikTok video skipped this run.")
+                reel_video_bytes = None
+                reel_video_url = None
 
             # Pinterest's video-pin cover_image_url rejects WebP (every
             # other image in this script is WebP) — it needs JPG/PNG. Also,
@@ -4030,6 +4570,41 @@ def main():
     })
     save_history(history)
 
+    # --- Facebook + Instagram (+ TikTok in video runs) ---
+    category_emoji = CATEGORY_EMOJIS.get(category, "🏠")
+    facebook_ok = False
+    instagram_ok = False
+    tiktok_ok = False
+    fb_message = (
+        f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
+        f"👉 Visit our website for the full guide!\n\n{tumblr_hashtags}"
+    )
+    ig_caption = (
+        f"{pin_hook}\n\n{category_emoji} {draft['title']}\n\n{social_description}\n\n"
+        f"Full post: link in bio 🔗\n\n{tumblr_hashtags}"
+    )
+    try:
+        if check_meta_token_health():
+            if RUN_TYPE == "video" and reel_video_url:
+                print("Posting Facebook video...")
+                facebook_ok = post_facebook_video(fb_message, reel_video_url, post_url)
+                print("Posting Instagram Reel...")
+                instagram_ok = post_instagram_reel(ig_caption, reel_video_url)
+            elif RUN_TYPE != "video" and ig_image_url:
+                print("Posting to Facebook Page...")
+                facebook_ok = post_to_facebook_page(fb_message, ig_image_url, post_url)
+                print("Posting to Instagram...")
+                instagram_ok = post_to_instagram(ig_caption, ig_image_url)
+            else:
+                print("No Facebook/Instagram media this run - skipped.")
+        else:
+            print("Skipping Facebook + Instagram - see the health check message above.")
+    except Exception as e:
+        print(f"Facebook/Instagram step failed (blog post is still published fine): {e}")
+    if RUN_TYPE == "video" and reel_video_bytes:
+        print("Posting to TikTok...")
+        tiktok_ok = post_to_tiktok(reel_video_bytes, f"{pin_hook} {draft['title']} {tumblr_hashtags}")
+
     # Pinterest is posted last and wrapped in try/except on purpose: if this
     # fails for any reason, the Blogger post has already gone live and should
     # NOT be rolled back or treated as a failed run.
@@ -4083,7 +4658,8 @@ description=extract_pin_description(
     print("Updating the all-posts hub page + Bing backlog...")
     boost_indexing(post_url, bing_ok, history)
 
-    save_status(blogger_ok=True, blogger_url=post_url, pinterest_ok=pinterest_ok, tumblr_ok=tumblr_ok)
+    save_status(blogger_ok=True, blogger_url=post_url, pinterest_ok=pinterest_ok, tumblr_ok=tumblr_ok,
+                facebook_ok=facebook_ok, instagram_ok=instagram_ok, tiktok_ok=tiktok_ok)
     print("Committing history + status...")
     commit_paths = [HISTORY_FILE, STATUS_FILE]
     if os.path.exists(BING_BACKLOG_FILE):
@@ -4097,15 +4673,20 @@ description=extract_pin_description(
         f"{tick(True)} DecorVibe posted: {draft['title'][:60]}",
         f"{draft['title']}\n{post_url}\n\n"
         f"Blogger: {tick(True)}\n"
+        f"Facebook: {tick(facebook_ok)}\n"
+        f"Instagram: {tick(instagram_ok)}\n"
         f"Pinterest: {tick(pinterest_ok)}\n"
-        f"Tumblr: {tick(tumblr_ok)}\n\n"
+        f"Tumblr: {tick(tumblr_ok)}\n"
+        f"TikTok: {tick(tiktok_ok)}\n\n"
         f"Article: {article_info}",
     )
 
     # Clean up what R2 only held for this run (Pinterest fetched its own copy of the
     # video cover). hero_url stays: Blogger embeds that exact URL permanently.
     print("Cleaning up temporary R2 files...")
-    delete_from_r2(pin_cover_filepath)
+    for path in [pin_cover_filepath, ig_filepath, reel_video_filepath]:
+        if path:
+            delete_from_r2(path)
 
 
 def _run_with_retry():
