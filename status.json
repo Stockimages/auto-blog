@@ -1,27 +1,27 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/11/5-gift-wrapping-station-mistakes-that.html",
-    "timestamp": "2026-11-07T01:36:45.070056+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-11-07T13:31:23.329579+00:00"
   },
   "pinterest": {
-    "success": true,
-    "timestamp": "2026-11-07T01:36:45.070056+00:00"
+    "success": false,
+    "timestamp": "2026-11-07T13:31:23.329579+00:00"
   },
   "tumblr": {
-    "success": true,
-    "timestamp": "2026-11-07T01:36:45.070056+00:00"
+    "success": false,
+    "timestamp": "2026-11-07T13:31:23.329579+00:00"
   },
   "facebook": {
-    "success": false,
-    "timestamp": "2026-11-07T01:36:45.070056+00:00"
+    "success": null,
+    "timestamp": "2026-11-07T13:31:23.329579+00:00"
   },
   "instagram": {
-    "success": false,
-    "timestamp": "2026-11-07T01:36:45.070056+00:00"
+    "success": null,
+    "timestamp": "2026-11-07T13:31:23.329579+00:00"
   },
   "tiktok": {
     "success": null,
-    "timestamp": "2026-11-07T01:36:45.070056+00:00"
+    "timestamp": "2026-11-07T13:31:23.329579+00:00"
   }
 }
