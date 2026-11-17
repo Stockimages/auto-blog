@@ -1,27 +1,27 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/11/6-budget-interior-door-ideas-that-look.html",
-    "timestamp": "2026-11-17T01:36:29.829629+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-11-17T13:32:22.151442+00:00"
   },
   "pinterest": {
     "success": false,
-    "timestamp": "2026-11-17T01:36:29.829629+00:00"
+    "timestamp": "2026-11-17T13:32:22.151442+00:00"
   },
   "tumblr": {
-    "success": true,
-    "timestamp": "2026-11-17T01:36:29.829629+00:00"
+    "success": false,
+    "timestamp": "2026-11-17T13:32:22.151442+00:00"
   },
   "facebook": {
-    "success": true,
-    "timestamp": "2026-11-17T01:36:29.829629+00:00"
+    "success": null,
+    "timestamp": "2026-11-17T13:32:22.151442+00:00"
   },
   "instagram": {
-    "success": true,
-    "timestamp": "2026-11-17T01:36:29.829629+00:00"
+    "success": null,
+    "timestamp": "2026-11-17T13:32:22.151442+00:00"
   },
   "tiktok": {
     "success": null,
-    "timestamp": "2026-11-17T01:36:29.829629+00:00"
+    "timestamp": "2026-11-17T13:32:22.151442+00:00"
   }
 }
