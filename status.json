@@ -1,27 +1,27 @@
 {
   "blogger": {
-    "success": true,
-    "url": "https://www.decorvibeto.com/2026/11/how-to-refresh-bathroom-with-custom.html",
-    "timestamp": "2026-11-23T01:37:17.711539+00:00"
+    "success": false,
+    "url": null,
+    "timestamp": "2026-11-23T13:34:01.311841+00:00"
   },
   "pinterest": {
     "success": false,
-    "timestamp": "2026-11-23T01:37:17.711539+00:00"
+    "timestamp": "2026-11-23T13:34:01.311841+00:00"
   },
   "tumblr": {
-    "success": true,
-    "timestamp": "2026-11-23T01:37:17.711539+00:00"
+    "success": false,
+    "timestamp": "2026-11-23T13:34:01.311841+00:00"
   },
   "facebook": {
-    "success": true,
-    "timestamp": "2026-11-23T01:37:17.711539+00:00"
+    "success": null,
+    "timestamp": "2026-11-23T13:34:01.311841+00:00"
   },
   "instagram": {
-    "success": true,
-    "timestamp": "2026-11-23T01:37:17.711539+00:00"
+    "success": null,
+    "timestamp": "2026-11-23T13:34:01.311841+00:00"
   },
   "tiktok": {
     "success": null,
-    "timestamp": "2026-11-23T01:37:17.711539+00:00"
+    "timestamp": "2026-11-23T13:34:01.311841+00:00"
   }
 }
