@@ -1,27 +1,27 @@
 {
   "blogger": {
-    "success": false,
-    "url": null,
-    "timestamp": "2026-11-23T13:49:30.231311+00:00"
+    "success": true,
+    "url": "https://www.decorvibeto.com/2026/11/a-thrift-store-shopping-list-for_0356785339.html",
+    "timestamp": "2026-11-24T01:35:49.487175+00:00"
   },
   "pinterest": {
     "success": false,
-    "timestamp": "2026-11-23T13:49:30.231311+00:00"
+    "timestamp": "2026-11-24T01:35:49.487175+00:00"
   },
   "tumblr": {
-    "success": false,
-    "timestamp": "2026-11-23T13:49:30.231311+00:00"
+    "success": true,
+    "timestamp": "2026-11-24T01:35:49.487175+00:00"
   },
   "facebook": {
-    "success": null,
-    "timestamp": "2026-11-23T13:49:30.231311+00:00"
+    "success": true,
+    "timestamp": "2026-11-24T01:35:49.487175+00:00"
   },
   "instagram": {
-    "success": null,
-    "timestamp": "2026-11-23T13:49:30.231311+00:00"
+    "success": true,
+    "timestamp": "2026-11-24T01:35:49.487175+00:00"
   },
   "tiktok": {
     "success": null,
-    "timestamp": "2026-11-23T13:49:30.231311+00:00"
+    "timestamp": "2026-11-24T01:35:49.487175+00:00"
   }
 }
